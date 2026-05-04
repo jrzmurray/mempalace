@@ -1307,7 +1307,20 @@ def hook_stop(data: dict, harness: str):
 
     _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
 
-    if since_last >= SAVE_INTERVAL and exchange_count > 0:
+    try:
+        # MempalaceConfig is already imported at module scope (line 20); a
+        # second local import here previously shadowed it for this whole
+        # function, making the earlier ``MempalaceConfig()`` calls above
+        # (hooks_auto_save / hook_silent_save) raise UnboundLocalError.
+        save_interval = int(MempalaceConfig().hooks_save_interval)
+    except Exception:
+        save_interval = SAVE_INTERVAL
+
+    if save_interval == 0:
+        _output({})
+        return
+
+    if since_last >= save_interval and exchange_count > 0:
         with _hook_write_routing_context() as routing:
             if routing.blocked:
                 _log_hook_write_blocked(routing, "stop-hook checkpoint")
