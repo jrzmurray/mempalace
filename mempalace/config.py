@@ -320,6 +320,50 @@ DEFAULT_HALL_KEYWORDS = {
 }
 
 
+# PHP's own extensions live in miner.PHP_EXTENSIONS and are unioned in by
+# miner.get_readable_extensions() rather than duplicated here, so the two
+# lists can't silently drift apart.
+DEFAULT_READABLE_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".py",
+    ".js",
+    ".ts",
+    ".jsx",
+    ".tsx",
+    ".json",
+    ".jsonl",
+    ".yaml",
+    ".yml",
+    ".html",
+    ".css",
+    ".java",
+    ".go",
+    ".rs",
+    ".swift",
+    ".kt",
+    ".kts",
+    ".rb",
+    ".sh",
+    ".csv",
+    ".sql",
+    ".toml",
+    ".tex",
+    ".bib",
+    # C# / .NET
+    ".cs",
+    ".csproj",
+    ".sln",
+    ".razor",
+    ".cshtml",
+    # C / C++
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+}
+
+
 class MempalaceConfig:
     """Configuration manager for MemPalace.
 
@@ -494,6 +538,11 @@ class MempalaceConfig:
     def hall_keywords(self):
         """Mapping of hall names to keyword lists."""
         return self._file_config.get("hall_keywords", DEFAULT_HALL_KEYWORDS)
+
+    @property
+    def readable_extensions(self):
+        """Set of file extensions that are considered readable for mining."""
+        return set(self._file_config.get("readable_extensions", DEFAULT_READABLE_EXTENSIONS))
 
     @staticmethod
     def _try_coerce_int(value, minimum=None):
@@ -876,6 +925,7 @@ class MempalaceConfig:
                 "collection_name": DEFAULT_COLLECTION_NAME,
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": DEFAULT_HALL_KEYWORDS,
+                "readable_extensions": list(DEFAULT_READABLE_EXTENSIONS),
             }
             with open(self._config_file, "w") as f:
                 json.dump(default_config, f, indent=2)

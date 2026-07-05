@@ -12,8 +12,8 @@ import yaml
 from mempalace.config import normalize_wing_name
 from mempalace.miner import (
     PHP_EXTENSIONS,
-    READABLE_EXTENSIONS,
     detect_room,
+    get_readable_extensions,
     load_config,
     mine,
     scan_project,
@@ -33,7 +33,7 @@ def scanned_files(project_root: Path, **kwargs):
 
 
 def test_php_ecosystem_extensions_are_readable():
-    assert PHP_EXTENSIONS <= READABLE_EXTENSIONS
+    assert PHP_EXTENSIONS <= get_readable_extensions()
 
 
 def test_scan_project_includes_php_ecosystem_files(tmp_path):
