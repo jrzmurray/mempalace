@@ -1132,7 +1132,10 @@ def hook_stop(data: dict, harness: str):
     _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
 
     try:
-        from .config import MempalaceConfig
+        # MempalaceConfig is already imported at module scope (line 20); a
+        # second local import here previously shadowed it for this whole
+        # function, making the earlier ``MempalaceConfig()`` calls above
+        # (hooks_auto_save / hook_silent_save) raise UnboundLocalError.
         save_interval = int(MempalaceConfig().hooks_save_interval)
     except Exception:
         save_interval = SAVE_INTERVAL
