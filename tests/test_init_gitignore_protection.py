@@ -22,10 +22,11 @@ def test_no_op_when_not_a_git_repo(tmp_path):
     assert not (tmp_path / ".gitignore").exists()
 
 
-def test_creates_gitignore_with_both_entries(tmp_path):
+def test_creates_gitignore_with_all_entries(tmp_path):
     _git_init(tmp_path)
     assert _ensure_mempalace_files_gitignored(tmp_path) is True
     contents = (tmp_path / ".gitignore").read_text()
+    assert ".mempalace/" in contents
     assert "mempalace.yaml" in contents
     assert "entities.json" in contents
     assert "issue #185" in contents
@@ -44,9 +45,9 @@ def test_appends_only_missing_entries(tmp_path):
     assert "node_modules/" in contents
 
 
-def test_idempotent_when_both_already_present(tmp_path):
+def test_idempotent_when_all_already_present(tmp_path):
     _git_init(tmp_path)
-    initial = "mempalace.yaml\nentities.json\n"
+    initial = ".mempalace/\nmempalace.yaml\nentities.json\n"
     (tmp_path / ".gitignore").write_text(initial)
     assert _ensure_mempalace_files_gitignored(tmp_path) is False
     assert (tmp_path / ".gitignore").read_text() == initial
@@ -59,6 +60,7 @@ def test_handles_gitignore_without_trailing_newline(tmp_path):
     contents = (tmp_path / ".gitignore").read_text()
     # Original entry preserved on its own line, not glued to the new block
     assert "dist\n" in contents
+    assert ".mempalace/" in contents
     assert "mempalace.yaml" in contents
     assert "entities.json" in contents
 
@@ -78,3 +80,14 @@ def test_gitignore_io_pins_utf8_and_defensive_decode(tmp_path):
 
     read_text.assert_called_once_with(encoding="utf-8", errors="replace")
     append_handle.assert_called_once_with(gitignore, "a", encoding="utf-8")
+
+
+def test_adds_dotmempalace_when_legacy_files_already_present(tmp_path):
+    _git_init(tmp_path)
+    (tmp_path / ".gitignore").write_text("mempalace.yaml\nentities.json\n")
+    assert _ensure_mempalace_files_gitignored(tmp_path) is True
+    contents = (tmp_path / ".gitignore").read_text()
+    assert ".mempalace/" in contents
+    # Legacy entries preserved exactly once each
+    assert contents.count("mempalace.yaml") == 1
+    assert contents.count("entities.json") == 1
