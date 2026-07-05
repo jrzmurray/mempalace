@@ -108,40 +108,23 @@ PHP_EXTENSIONS = {
     ".volt",
 }
 
-READABLE_EXTENSIONS = {
-    ".txt",
-    ".md",
-    ".py",
-    ".js",
-    ".ts",
-    ".jsx",
-    ".tsx",
-    ".json",
-    ".jsonl",
-    ".yaml",
-    ".yml",
-    ".html",
-    ".css",
-    ".java",
-    ".go",
-    ".rs",
-    ".swift",
-    ".kt",
-    ".kts",
-    ".rb",
-    ".sh",
-    ".csv",
-    ".sql",
-    ".toml",
-    ".tex",
-    ".bib",
-    # C# / .NET
-    ".cs",
-    ".csproj",
-    ".sln",
-    ".razor",
-    ".cshtml",
-} | PHP_EXTENSIONS
+
+def get_readable_extensions() -> set:
+    """Set of file extensions considered readable for mining.
+
+    Backed by ``MempalaceConfig().readable_extensions`` (user-configurable
+    via ``config.json``), unioned with ``PHP_EXTENSIONS`` so the two lists
+    can't drift apart. Reads config fresh on every call rather than caching
+    at import/first-use time — ``MempalaceConfig()`` already re-reads
+    config.json on every instantiation, so a stale module-level cache here
+    would be the only config-driven property in this codebase that ignores
+    edits made after process start (relevant for the long-running MCP
+    server, which doesn't get restarted just because config.json changed).
+    """
+    from .config import MempalaceConfig
+
+    return MempalaceConfig().readable_extensions | PHP_EXTENSIONS
+
 
 SKIP_FILENAMES = {
     "entities.json",
@@ -1644,6 +1627,10 @@ def scan_project(
     matcher_cache = {}
     include_paths = normalize_include_paths(include_ignored)
     exclude_matcher = GitignoreMatcher.from_patterns(project_path, exclude_patterns or [])
+    # Computed once per scan (not once per file): still reflects any edit to
+    # config.json made before this scan started, without re-reading the file
+    # for every entry in a large tree.
+    readable_extensions = get_readable_extensions()
 
     for root, dirs, filenames in os.walk(project_path):
         root_path = Path(root)
@@ -1686,7 +1673,7 @@ def scan_project(
 
             if not force_include and filename in SKIP_FILENAMES:
                 continue
-            if filepath.suffix.lower() not in READABLE_EXTENSIONS and not exact_force_include:
+            if filepath.suffix.lower() not in readable_extensions and not exact_force_include:
                 continue
             if respect_gitignore and active_matchers and not force_include:
                 if is_gitignored(filepath, active_matchers, is_dir=False):
