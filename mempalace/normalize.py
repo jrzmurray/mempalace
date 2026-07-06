@@ -281,10 +281,21 @@ def strip_noise(text: str) -> str:
     return text.strip()
 
 
-def normalize(filepath: str) -> str:
-    """
-    Load a file and normalize to transcript format if it's a chat export.
-    Plain text files pass through unchanged.
+def _read_source_file(filepath: str) -> str:
+    """Hardened raw-content read shared by normalize() and any caller that
+    needs the exact same raw content it would read (e.g. convo_miner's
+    incremental-mining cursor computation, which needs raw JSONL lines
+    alongside the parsed transcript). Rejects symlinks, requires a
+    regular file, and caps size at 500 MB.
+
+    Centralizing this is what lets a caller read a file ONCE and hand
+    the same string to both normalize() and a second consumer, instead
+    of two independent reads that could observe different content if the
+    file is actively being appended to between them (a real scenario for
+    an in-progress Claude Code session) -- and without this, a second,
+    separately-written reader could easily end up LESS careful than this
+    one (e.g. skipping the symlink/size checks), a real gap even before
+    considering the race.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     if os.path.islink(filepath):
@@ -299,7 +310,7 @@ def normalize(filepath: str) -> str:
             raise IOError(f"File too large ({file_stat.st_size // (1024 * 1024)} MB): {filepath}")
         with os.fdopen(fd, "r", encoding="utf-8-sig", errors="replace") as f:
             fd = -1
-            content = f.read()
+            return f.read()
     except OSError as e:
         raise IOError(f"Could not read {filepath}: {e}") from e
     finally:
@@ -308,6 +319,24 @@ def normalize(filepath: str) -> str:
                 os.close(fd)
             except OSError:
                 pass
+
+
+def normalize(filepath: str, content: Optional[str] = None) -> str:
+    """
+    Load a file and normalize to transcript format if it's a chat export.
+    Plain text files pass through unchanged.
+
+    ``content``, when given, is used directly instead of re-reading
+    ``filepath`` -- lets a caller that already read the file (see
+    ``_read_source_file``) avoid a second read and the TOCTOU risk of two
+    independent reads observing different states of a file that's
+    actively being appended to (e.g. convo_miner computing an
+    incremental-mining cursor from the same content it just chunked).
+    Every existing caller omits this parameter and sees no behavior
+    change: the read happens exactly as before.
+    """
+    if content is None:
+        content = _read_source_file(filepath)
 
     if not content.strip():
         return content

@@ -772,40 +772,62 @@ class TestFlagPossibleDuplicates:
 
 
 class TestComputeConvoCursor:
-    def test_zero_chunks_returns_none(self, tmp_path):
-        f = tmp_path / "session.jsonl"
-        f.write_text('{"type":"user","message":{"content":"hi"}}\n')
-        assert _compute_convo_cursor(str(f), num_chunks=0) is None
+    """_compute_convo_cursor takes the RAW content the caller already read
+    for normalize()/chunk_exchanges -- not a file path -- specifically so
+    it can never re-read a different state of a file that's actively
+    being appended to (see the docstring for the full rationale)."""
 
-    def test_non_claude_code_format_returns_none(self, tmp_path):
-        """Plain text (or any format other than Claude Code JSONL) gets no
-        cursor -- the safe "no incremental path for this format" default."""
-        f = tmp_path / "chat.txt"
-        f.write_text("> hello\nhi there\n\n> how are you\ngood thanks\n")
-        assert _compute_convo_cursor(str(f), num_chunks=2) is None
+    def test_zero_chunks_returns_none(self):
+        content = '{"type":"user","message":{"content":"hi"}}\n'
+        assert _compute_convo_cursor(content, num_chunks=0) is None
 
-    def test_unreadable_file_returns_none(self, tmp_path):
-        missing = tmp_path / "does_not_exist.jsonl"
-        assert _compute_convo_cursor(str(missing), num_chunks=1) is None
+    def test_non_claude_code_content_returns_none(self):
+        """Content that doesn't parse as Claude Code JSONL at all (e.g.
+        plain text) gets no cursor -- the safe "no incremental path for
+        this format" default."""
+        content = "just some plain text, not JSON at all\nsecond line\n"
+        assert _compute_convo_cursor(content, num_chunks=2) is None
 
-    def test_real_claude_code_jsonl_computes_correct_cursor(self, tmp_path):
+    def test_below_exchange_chunking_threshold_returns_none(self):
+        """The bug this test guards against: chunk_exchanges falls back to
+        paragraph/character-offset chunking when the transcript has fewer
+        than 3 quoted lines (chunk_exchanges' own quote_lines >= 3 gate).
+        In that mode "chunk N" has no correspondence to "the Nth user
+        turn" at all -- a cursor computed here would silently attach
+        wrong position data to an unrelated chunk. Must mirror that gate
+        exactly and return None rather than compute a misleading cursor.
+        A single exchange produces only 2 quoted lines' worth of
+        structure (one user turn) -- below the threshold.
+        """
         import json as jsonlib
 
-        f = tmp_path / "session.jsonl"
+        content = "\n".join(
+            [
+                jsonlib.dumps({"type": "human", "message": {"content": "Q1"}}),
+                jsonlib.dumps({"type": "assistant", "message": {"content": "A1"}}),
+            ]
+        )
+        assert _compute_convo_cursor(content, num_chunks=2) is None
+
+    def test_real_claude_code_jsonl_computes_correct_cursor(self):
+        import json as jsonlib
+
         lines = [
             jsonlib.dumps({"type": "human", "message": {"content": "Q1"}}),  # line 0
             jsonlib.dumps({"type": "assistant", "message": {"content": "A1"}}),  # line 1
             jsonlib.dumps({"type": "human", "message": {"content": "Q2"}}),  # line 2
             jsonlib.dumps({"type": "assistant", "message": {"content": "A2"}}),  # line 3
+            jsonlib.dumps({"type": "human", "message": {"content": "Q3"}}),  # line 4
+            jsonlib.dumps({"type": "assistant", "message": {"content": "A3"}}),  # line 5
         ]
-        f.write_text("\n".join(lines) + "\n")
+        content = "\n".join(lines) + "\n"
 
-        cursor = _compute_convo_cursor(str(f), num_chunks=2)
+        cursor = _compute_convo_cursor(content, num_chunks=3)
         assert cursor is not None
-        assert cursor["cursor_line"] == 2  # the second (last) user turn
-        assert cursor["cursor_chunk_index"] == 1  # 0-indexed, last of 2 chunks
+        assert cursor["cursor_line"] == 4  # the third (last) user turn
+        assert cursor["cursor_chunk_index"] == 2  # 0-indexed, last of 3 chunks
         assert cursor["cursor_format"] == "claude_code_jsonl"
-        expected_hash = __import__("hashlib").sha256(lines[2].encode("utf-8")).hexdigest()
+        expected_hash = __import__("hashlib").sha256(lines[4].encode("utf-8")).hexdigest()
         assert cursor["cursor_anchor_hash"] == expected_hash
 
 
@@ -817,11 +839,18 @@ class TestConvoCursorStorage:
         tmpdir = tempfile.mkdtemp()
         try:
             convo_path = Path(tmpdir) / "session.jsonl"
+            # At least 3 exchanges: chunk_exchanges only takes the real
+            # exchange-pair path (which a cursor can meaningfully anchor
+            # on) once the transcript has >= 3 quoted lines; fewer than
+            # that falls back to paragraph chunking, where no cursor is
+            # computed at all (see TestComputeConvoCursor).
             entries = [
                 '{"type":"human","message":{"content":"What is the plan?"}}',
                 '{"type":"assistant","message":{"content":"Start with the schema."}}',
                 '{"type":"human","message":{"content":"Any risks?"}}',
                 '{"type":"assistant","message":{"content":"Migration ordering is the main one."}}',
+                '{"type":"human","message":{"content":"What about rollback?"}}',
+                '{"type":"assistant","message":{"content":"We snapshot before every migration."}}',
             ]
             convo_path.write_text("\n".join(entries) + "\n")
             palace_path = os.path.join(tmpdir, "palace")

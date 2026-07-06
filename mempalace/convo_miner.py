@@ -21,7 +21,7 @@ from typing import Optional
 
 from .collision_scan import assert_no_collisions
 from .ids import ID_RECIPE, make_convo_drawer_id, make_convo_sentinel_id
-from .normalize import normalize
+from .normalize import _read_source_file, normalize
 from .entities import entities_metadata
 from .palace import (
     NORMALIZE_VERSION,
@@ -454,13 +454,21 @@ def _extract_authored_at(filepath):
     return latest
 
 
-def _compute_convo_cursor(source_file: str, num_chunks: int) -> Optional[dict]:
+def _compute_convo_cursor(raw_content: str, num_chunks: int) -> Optional[dict]:
     """Compute the incremental-mining cursor for a Claude Code JSONL
     transcript: the raw line where the trailing exchange (the last chunk
     ``chunk_exchanges`` would produce) began, so a future re-mine of a
     grown/extended session can resume from there instead of reprocessing
     the whole file. This only COMPUTES and STORES the cursor -- nothing
     yet reads or acts on it, so this changes no existing mining behavior.
+
+    ``raw_content`` must be the SAME content the caller already read and
+    passed to ``normalize()`` to produce the chunks being filed this
+    pass -- not a fresh re-read of the file. A second, independent read
+    here could observe a different state of a file that's actively being
+    appended to (the exact scenario this feature exists for), producing
+    a cursor that describes content different from what was actually
+    mined in this pass.
 
     Returns None (no cursor recorded, meaning "no incremental path
     available, full reprocess next time" -- always a safe default) when:
@@ -469,9 +477,14 @@ def _compute_convo_cursor(source_file: str, num_chunks: int) -> Optional[dict]:
       format currently verified append-only across /compact and /clear;
       every other format falls back to full reprocess, unconditionally,
       by simply never getting a cursor);
-    - the file can't be read again (already mined once via ``normalize()``
-      moments ago, so this would be a very surprising failure, but treated
-      the same safe way as any other unreadable-file case elsewhere here).
+    - ``chunk_exchanges`` would fall back to paragraph/character-offset
+      chunking for this content (fewer than 3 quoted lines) rather than
+      real exchange-pair chunking -- "the last user-role message" has no
+      correspondence to "the last chunk" in that mode, so a cursor
+      computed here would silently attach wrong position data to an
+      unrelated chunk. Mirrors ``chunk_exchanges``' own ``quote_lines >=
+      3`` condition exactly, checked against the same parsed transcript
+      text, so the two can't silently drift out of sync with each other.
 
     Scoped to extract_mode="exchange" only for now (the caller does not
     invoke this for "general" mode): chunk_exchanges' one-chunk-per-user-
@@ -481,15 +494,16 @@ def _compute_convo_cursor(source_file: str, num_chunks: int) -> Optional[dict]:
     """
     if num_chunks <= 0:
         return None
-    try:
-        raw_content = Path(source_file).read_text(encoding="utf-8-sig", errors="replace")
-    except OSError:
-        return None
 
     from .normalize import _try_claude_code_jsonl
 
     parsed = _try_claude_code_jsonl(raw_content, track_positions=True)
     if parsed is None:
+        return None
+
+    transcript_lines = parsed.text.split("\n")
+    quote_lines = sum(1 for line in transcript_lines if line.strip().startswith(">"))
+    if quote_lines < 3:
         return None
 
     last_user_idx = None
@@ -871,9 +885,13 @@ def _mine_convos_impl(
             files_skipped += 1
             continue
 
-        # Normalize format
+        # Read once, normalize from that same content -- a second,
+        # independent read (e.g. for cursor computation further below)
+        # could otherwise observe a different state of a file that's
+        # actively being appended to than the one actually mined here.
         try:
-            content = normalize(str(filepath))
+            raw_content = _read_source_file(str(filepath))
+            content = normalize(str(filepath), content=raw_content)
         except (OSError, ValueError):
             if not dry_run:
                 _register_file(collection, source_file, wing, agent, extract_mode)
@@ -939,7 +957,7 @@ def _mine_convos_impl(
         # format, which is exactly the desired "no incremental path for
         # this format" default.
         cursor = (
-            _compute_convo_cursor(source_file, len(chunks)) if extract_mode != "general" else None
+            _compute_convo_cursor(raw_content, len(chunks)) if extract_mode != "general" else None
         )
 
         # Lock + purge stale + file fresh chunks. Lock serializes concurrent
