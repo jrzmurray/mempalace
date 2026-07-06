@@ -628,6 +628,33 @@ class MempalaceConfig:
         """Set of file extensions that are considered readable for mining."""
         return set(self._file_config.get("readable_extensions", DEFAULT_READABLE_EXTENSIONS))
 
+    @property
+    def noise_patterns_file(self):
+        """Path to a user-supplied file of extra strip_noise() substitution
+        rules, or None if nothing is configured.
+
+        Resolution order: ``MEMPALACE_NOISE_PATTERNS_FILE`` env var, then
+        ``noise_patterns_file`` in config.json, then
+        ``<config_dir>/noise_patterns.txt`` if that file happens to exist.
+        The default path is opt-in-by-presence: if you never create it,
+        this returns None and strip_noise() behaves exactly as before --
+        no explicit configuration required to get the old behavior.
+
+        File format (see mempalace/normalize.py's loader for the full
+        contract): one rule per line, ``<regex><TAB><replacement>``, ``#``
+        comments and blank lines skipped.
+        """
+        env_val = os.environ.get("MEMPALACE_NOISE_PATTERNS_FILE", "").strip()
+        if env_val:
+            return env_val
+        configured = self._file_config.get("noise_patterns_file")
+        if configured:
+            return str(configured)
+        default_path = self._config_dir / "noise_patterns.txt"
+        if default_path.is_file():
+            return str(default_path)
+        return None
+
     @staticmethod
     def _try_coerce_int(value, minimum=None):
         """Coerce a raw config value to int, or ``None`` if it cannot be a
