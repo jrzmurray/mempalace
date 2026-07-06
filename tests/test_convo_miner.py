@@ -1298,3 +1298,145 @@ class TestConvoCursorStorage:
             assert with_cursor == []
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── incremental mining wired in (opt-in, off by default) ─────────────────
+
+
+class TestIncrementalMiningWiredIn:
+    """End-to-end through the real mine_convos()/palace path: when
+    incremental_mining_enabled is set, growing a previously-mined
+    transcript re-chunks only the trailing exchange onward instead of
+    purging and rebuilding the whole file -- proven by the STABLE
+    prefix's drawers surviving the second mine completely untouched
+    (same filed_at, not just same content -- filed_at is stamped fresh
+    on every upsert, so an unchanged filed_at proves no re-upsert
+    happened). Off by default, existing full-remine behavior is
+    unchanged from before this feature existed."""
+
+    @staticmethod
+    def _write_jsonl(path: Path, num_exchanges: int) -> None:
+        import json as jsonlib
+
+        lines = []
+        for i in range(1, num_exchanges + 1):
+            lines.append(
+                jsonlib.dumps(
+                    {"type": "human", "message": {"content": f"Question number {i} about the plan"}}
+                )
+            )
+            lines.append(
+                jsonlib.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": f"Answer number {i} explaining the approach in detail"
+                        },
+                    }
+                )
+            )
+        path.write_text("\n".join(lines) + "\n")
+
+    def test_disabled_by_default_full_remine_on_growth(self, monkeypatch, capsys):
+        monkeypatch.delenv("MEMPALACE_INCREMENTAL_MINING", raising=False)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            convo_path = Path(tmpdir) / "session.jsonl"
+            self._write_jsonl(convo_path, 3)
+            palace_path = os.path.join(tmpdir, "palace")
+
+            mine_convos(tmpdir, palace_path, wing="test")
+            capsys.readouterr()
+
+            time.sleep(0.05)  # ensure a distinct mtime
+            self._write_jsonl(convo_path, 4)
+            mine_convos(tmpdir, palace_path, wing="test")
+            out = capsys.readouterr().out
+            assert "(incremental)" not in out
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_enabled_reuses_stable_prefix_without_reupserting(self, monkeypatch, capsys):
+        monkeypatch.setenv("MEMPALACE_INCREMENTAL_MINING", "true")
+        tmpdir = tempfile.mkdtemp()
+        try:
+            convo_path = Path(tmpdir) / "session.jsonl"
+            self._write_jsonl(convo_path, 3)
+            palace_path = os.path.join(tmpdir, "palace")
+
+            mine_convos(tmpdir, palace_path, wing="test")
+            capsys.readouterr()
+
+            client = chromadb.PersistentClient(path=palace_path)
+            col = client.get_collection("mempalace_drawers")
+            first = col.get(include=["metadatas", "documents"])
+            first_by_id = dict(zip(first["ids"], zip(first["documents"], first["metadatas"])))
+            del col, client
+
+            time.sleep(0.05)
+            self._write_jsonl(convo_path, 5)  # grow by 2 more exchanges
+
+            mine_convos(tmpdir, palace_path, wing="test")
+            out = capsys.readouterr().out
+            assert "(incremental)" in out
+
+            client = chromadb.PersistentClient(path=palace_path)
+            col = client.get_collection("mempalace_drawers")
+            second = col.get(include=["metadatas", "documents"])
+            second_by_id = dict(zip(second["ids"], zip(second["documents"], second["metadatas"])))
+
+            # Every drawer except the one that carried the cursor (the
+            # old trailing exchange, superseded by this pass) must
+            # survive completely untouched.
+            first_cursor_id = next(
+                did for did, (_, meta) in first_by_id.items() if meta.get("cursor_format")
+            )
+            stable_ids = set(first_by_id) - {first_cursor_id}
+            assert stable_ids, "test setup should produce more than one drawer on the first mine"
+            for did in stable_ids:
+                assert did in second_by_id, f"{did} missing after incremental mine"
+                assert second_by_id[did][0] == first_by_id[did][0], f"{did} content changed"
+                assert second_by_id[did][1].get("filed_at") == first_by_id[did][1].get(
+                    "filed_at"
+                ), f"{did}'s filed_at changed -- it was re-upserted, not left untouched"
+
+            # The end result must still equal a full re-mine of the same
+            # final content -- the equivalence claim, now exercised
+            # end-to-end through the real palace.
+            del col, client
+            palace_path_full = os.path.join(tmpdir, "palace_full_control")
+            mine_convos(tmpdir, palace_path_full, wing="test")
+            client2 = chromadb.PersistentClient(path=palace_path_full)
+            col2 = client2.get_collection("mempalace_drawers")
+            full = col2.get(include=["documents"])
+            assert sorted(second["documents"]) == sorted(full["documents"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_falls_back_to_full_remine_when_no_stored_cursor(self, monkeypatch, capsys):
+        """A file with nothing to resume from (mined before any cursor
+        was ever computed for it -- e.g. it was below the exchange-
+        chunking threshold at the time) still mines correctly via the
+        existing full path, even with incremental mining enabled."""
+        monkeypatch.setenv("MEMPALACE_INCREMENTAL_MINING", "true")
+        tmpdir = tempfile.mkdtemp()
+        try:
+            convo_path = Path(tmpdir) / "session.jsonl"
+            entries = [
+                '{"type":"human","message":{"content":"A short question long enough to clear the min chunk size floor"}}',
+                '{"type":"assistant","message":{"content":"A short answer long enough to clear the min chunk size floor too"}}',
+            ]
+            convo_path.write_text("\n".join(entries) + "\n")
+            palace_path = os.path.join(tmpdir, "palace")
+            mine_convos(tmpdir, palace_path, wing="test")
+            capsys.readouterr()
+
+            time.sleep(0.05)
+            self._write_jsonl(convo_path, 3)  # now clears the threshold
+
+            mine_convos(tmpdir, palace_path, wing="test")
+            out = capsys.readouterr().out
+            assert "(incremental)" not in out
+            assert "Files skipped (already filed): 0" in out
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
