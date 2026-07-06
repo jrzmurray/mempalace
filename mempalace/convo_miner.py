@@ -733,9 +733,18 @@ def _fetch_stored_cursor(collection, source_file: str, extract_mode: str) -> Opt
 
     Returns None when no drawer for this source_file/extract_mode
     carries cursor metadata (never computed -- wrong format, general
-    mode, below the exchange-chunking threshold, etc.) or when more
-    than one somehow does (a data inconsistency; safer to fall back to
-    a full re-mine than guess which one is current).
+    mode, below the exchange-chunking threshold, etc.), when the only
+    cursor-bearing drawer found is stamped with an older
+    ``normalize_version`` (a schema bump means the stored chunk/cursor
+    shape may not match what the current normalize/chunk pipeline would
+    produce -- a full rebuild is required, same as it already is for
+    any other stale-schema drawer), or when more than one candidate
+    somehow does (a data inconsistency; safer to fall back to a full
+    re-mine than guess which one is current). This function does not
+    rely on its caller having already excluded stale-schema files (even
+    though today's only caller does, via ``mined_mtimes``) -- the
+    version check is repeated here so this function's own correctness
+    doesn't depend on staying in sync with a gate several frames away.
 
     The returned dict also carries a ``"room"`` key -- the topic
     classification stored on that same drawer -- so a caller doing an
@@ -761,6 +770,8 @@ def _fetch_stored_cursor(collection, source_file: str, extract_mode: str) -> Opt
             if not _metadata_matches_extract_mode(meta, extract_mode):
                 continue
             if not meta.get("cursor_format"):
+                continue
+            if meta.get("normalize_version", 1) < NORMALIZE_VERSION:
                 continue
             if found is not None:
                 return None
@@ -1213,7 +1224,14 @@ def _attempt_incremental_mine(
     # Reuse the file's existing room classification rather than
     # reclassify from a partial/tail-only sample -- incremental mining
     # deliberately leaves everything about the stable prefix untouched,
-    # including its topic classification.
+    # including its topic classification. This matches what a full
+    # re-mine would produce whenever the file was already past
+    # detect_convo_room's ~3000-character sample size at its first mine
+    # (the common case for a real transcript) -- it can only diverge
+    # for a file still under that size when first mined, which then
+    # keeps its original room indefinitely rather than picking up
+    # whatever a later full re-mine's fresh sample would classify (see
+    # MempalaceConfig.incremental_mining_enabled's docstring).
     room = stored_cursor.get("room")
 
     # The grown file's new total chunk count, without re-chunking it:

@@ -10,6 +10,7 @@ import pytest
 
 from mempalace.convo_miner import (
     _compute_convo_cursor,
+    _fetch_stored_cursor,
     _flag_possible_duplicates,
     _incremental_reparse,
     _is_ai_tool_path,
@@ -1298,6 +1299,113 @@ class TestConvoCursorStorage:
             assert with_cursor == []
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestFetchStoredCursor:
+    """_fetch_stored_cursor scans one source file's own drawers for the
+    cursor a prior mine stored, applying the same schema-version and
+    extract_mode scoping other lookups in this module use -- verified
+    directly here rather than relying only on end-to-end coverage, since
+    an incorrect cursor returned here would silently drive an
+    incremental mine off stale or wrong data."""
+
+    @staticmethod
+    def _make_collection(metadatas: list) -> MagicMock:
+        ids = [f"d{i}" for i in range(len(metadatas))]
+        mock_col = MagicMock()
+        # _fetch_stored_cursor loops until a batch comes back with no ids
+        # (matching the paginated-scan pattern used elsewhere in this
+        # module) -- the first call returns the real data, the second
+        # terminates the loop.
+        mock_col.get.side_effect = [
+            {"ids": ids, "metadatas": metadatas},
+            {"ids": [], "metadatas": []},
+        ]
+        return mock_col
+
+    def test_returns_none_when_no_cursor_bearing_drawer(self):
+        col = self._make_collection([{"source_file": "a.jsonl", "chunk_index": 0}])
+        assert _fetch_stored_cursor(col, "a.jsonl", "exchange") is None
+
+    def test_returns_cursor_and_room_when_found(self):
+        from mempalace.palace import NORMALIZE_VERSION
+
+        meta = {
+            "source_file": "a.jsonl",
+            "chunk_index": 2,
+            "cursor_line": 10,
+            "cursor_chunk_index": 2,
+            "cursor_anchor_hash": "abc123",
+            "cursor_format": "claude_code_jsonl",
+            "room": "technical",
+            "normalize_version": NORMALIZE_VERSION,
+        }
+        col = self._make_collection([meta])
+        result = _fetch_stored_cursor(col, "a.jsonl", "exchange")
+        assert result == {
+            "cursor_line": 10,
+            "cursor_chunk_index": 2,
+            "cursor_anchor_hash": "abc123",
+            "cursor_format": "claude_code_jsonl",
+            "room": "technical",
+        }
+
+    def test_returns_none_when_cursor_drawer_has_stale_normalize_version(self):
+        """A cursor-bearing drawer stamped with an older schema version
+        must not drive an incremental mine -- the stored chunk/cursor
+        shape may not match what the current pipeline would produce.
+        Enforced directly here, not just relied on via a caller's own
+        mined_mtimes gate."""
+        from mempalace.palace import NORMALIZE_VERSION
+
+        meta = {
+            "source_file": "a.jsonl",
+            "chunk_index": 2,
+            "cursor_line": 10,
+            "cursor_chunk_index": 2,
+            "cursor_anchor_hash": "abc123",
+            "cursor_format": "claude_code_jsonl",
+            "room": "technical",
+            "normalize_version": NORMALIZE_VERSION - 1,
+        }
+        col = self._make_collection([meta])
+        assert _fetch_stored_cursor(col, "a.jsonl", "exchange") is None
+
+    def test_returns_none_when_more_than_one_cursor_bearing_drawer(self):
+        """A data inconsistency (shouldn't happen under normal operation,
+        since only one chunk per file is ever stamped) -- safer to fall
+        back to a full re-mine than guess which one is current."""
+        from mempalace.palace import NORMALIZE_VERSION
+
+        base = {
+            "source_file": "a.jsonl",
+            "cursor_format": "claude_code_jsonl",
+            "cursor_line": 4,
+            "cursor_anchor_hash": "x",
+            "room": "technical",
+            "normalize_version": NORMALIZE_VERSION,
+        }
+        meta1 = {**base, "chunk_index": 1, "cursor_chunk_index": 1}
+        meta2 = {**base, "chunk_index": 3, "cursor_chunk_index": 3}
+        col = self._make_collection([meta1, meta2])
+        assert _fetch_stored_cursor(col, "a.jsonl", "exchange") is None
+
+    def test_ignores_drawers_from_a_different_extract_mode(self):
+        from mempalace.palace import NORMALIZE_VERSION
+
+        meta = {
+            "source_file": "a.jsonl",
+            "chunk_index": 0,
+            "extract_mode": "general",
+            "cursor_format": "claude_code_jsonl",
+            "cursor_line": 0,
+            "cursor_chunk_index": 0,
+            "cursor_anchor_hash": "x",
+            "room": "technical",
+            "normalize_version": NORMALIZE_VERSION,
+        }
+        col = self._make_collection([meta])
+        assert _fetch_stored_cursor(col, "a.jsonl", "exchange") is None
 
 
 # ── incremental mining wired in (opt-in, off by default) ─────────────────

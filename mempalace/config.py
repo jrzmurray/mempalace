@@ -611,6 +611,22 @@ class MempalaceConfig:
         *attempt* is made, never removes the fallback. Env var
         ``MEMPALACE_INCREMENTAL_MINING`` takes precedence over
         config.json's ``incremental_mining.enabled``.
+
+        Known trade-off: an incremental update reuses the file's
+        existing room (topic) classification instead of recomputing it
+        against the grown content, since ``detect_convo_room`` only
+        samples the first ~3000 characters of the normalized
+        transcript -- for any file already past that size at its first
+        mine, a full re-mine would sample the same leading text and
+        classify identically anyway, so this matches full-remine
+        behavior in the common case. It only diverges for a file that
+        was still under ~3000 characters when first mined and later
+        grows past it -- there, the incremental path keeps the
+        original (now possibly stale) room indefinitely, rather than
+        picking up whatever a full re-mine's fresh sample would
+        classify. Content, chunk_index, and every other per-chunk field
+        stay exactly equivalent to a full re-mine regardless; only this
+        one coarse, already-soft classification can lag.
         """
         env_val = os.environ.get("MEMPALACE_INCREMENTAL_MINING", "").strip()
         if env_val:
