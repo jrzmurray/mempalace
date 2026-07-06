@@ -853,3 +853,51 @@ def test_max_backups_bad_env_falls_back_to_config(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMPALACE_MAX_BACKUPS", "garbage")
     cfg = MempalaceConfig(config_dir=str(tmp_path))
     assert cfg.max_backups == 4
+
+
+# ── noise_patterns_file ──────────────────────────────────────────────
+
+
+def test_noise_patterns_file_default_none_when_nothing_configured(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEMPALACE_NOISE_PATTERNS_FILE", raising=False)
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.noise_patterns_file is None
+
+
+def test_noise_patterns_file_default_path_used_when_it_exists(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEMPALACE_NOISE_PATTERNS_FILE", raising=False)
+    default_file = tmp_path / "noise_patterns.txt"
+    default_file.write_text("foo\tbar\n")
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.noise_patterns_file == str(default_file)
+
+
+def test_noise_patterns_file_from_config_json(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEMPALACE_NOISE_PATTERNS_FILE", raising=False)
+    custom = tmp_path / "custom_noise.txt"
+    custom.write_text("foo\tbar\n")
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"noise_patterns_file": str(custom)}, f)
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.noise_patterns_file == str(custom)
+
+
+def test_noise_patterns_file_env_override_wins(monkeypatch, tmp_path):
+    custom = tmp_path / "custom_noise.txt"
+    custom.write_text("foo\tbar\n")
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"noise_patterns_file": "/should/not/be/used.txt"}, f)
+    monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(custom))
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.noise_patterns_file == str(custom)
+
+
+def test_noise_patterns_file_config_json_value_not_required_to_exist(monkeypatch, tmp_path):
+    """config.json/env values are returned as-is, unlike the bare default
+    path -- a typo'd explicit path should surface as a load failure
+    downstream, not be silently swallowed back to None here."""
+    monkeypatch.delenv("MEMPALACE_NOISE_PATTERNS_FILE", raising=False)
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"noise_patterns_file": "/nonexistent/path.txt"}, f)
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.noise_patterns_file == "/nonexistent/path.txt"

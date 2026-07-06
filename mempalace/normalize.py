@@ -18,10 +18,12 @@ Supported:
 No API key. No internet. Everything local.
 """
 
+import functools
 import json
 import os
 import re
 import stat
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -173,6 +175,78 @@ _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_SIMPLE_RE = re.compile(r"\x1b[\x30-\x5a\x5c\x5e-\x7e]")
 
 
+@functools.lru_cache(maxsize=1)
+def _dynamic_noise_patterns() -> tuple:
+    """Load and compile user-supplied strip_noise() substitution rules.
+
+    This is the "grep pattern file, but for substitutions" hook: an
+    external, user-editable file of extra strip/replace rules, read at
+    invocation instead of hardcoded, for noise that's specific to one
+    person's environment or corpus (absolute file paths, a particular
+    tool's boilerplate output, etc.) rather than universal across every
+    Claude Code install the way the tag/ANSI patterns above are.
+
+    Source file resolution (see MempalaceConfig.noise_patterns_file):
+    ``MEMPALACE_NOISE_PATTERNS_FILE`` env var, then ``noise_patterns_file``
+    in ``~/.mempalace/config.json``, then ``~/.mempalace/noise_patterns.txt``
+    if that file happens to exist. Nothing configured -> empty tuple ->
+    strip_noise() behaves exactly as it did before this existed.
+
+    File format: one rule per line, ``<regex><TAB><replacement>``. ``#``
+    lines and blank lines are skipped. Replacement follows Python
+    ``re.sub`` semantics (backreferences like ``\\1`` work; an empty
+    replacement deletes the match). For case-insensitive matching, prefix
+    the pattern with ``(?i)`` -- standard Python inline-flag syntax --
+    rather than a separate flags column, to keep the file two-column-simple.
+    A line with an invalid regex or missing tab is skipped with a warning
+    on stderr rather than aborting the whole mine; one bad line in a
+    hand-edited file shouldn't take down ingestion.
+
+    Cached for the process lifetime (functools.lru_cache): this runs once
+    per MESSAGE during mining, not once per file or once per mine
+    invocation, so re-reading and recompiling the file on every call would
+    be a measurable cost across a large transcript corpus. In practice
+    this means a change to the file takes effect on the next `mempalace
+    mine` invocation (a fresh, short-lived process) but NOT mid-session in
+    the long-running MCP server without a restart -- same trade-off
+    entity_detector.py already makes for its COCA/known-systems data files.
+    """
+    try:
+        from .config import MempalaceConfig
+
+        path = MempalaceConfig().noise_patterns_file
+    except Exception:
+        path = None
+    if not path:
+        return ()
+
+    try:
+        raw_lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        print(f"WARNING: could not read noise_patterns_file {path}: {exc}", file=sys.stderr)
+        return ()
+
+    compiled = []
+    for lineno, raw_line in enumerate(raw_lines, 1):
+        line = raw_line.rstrip("\n")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "\t" not in line:
+            print(
+                f"WARNING: {path}:{lineno}: no tab separator between pattern and "
+                f"replacement, skipping: {line!r}",
+                file=sys.stderr,
+            )
+            continue
+        pattern_str, replacement = line.split("\t", 1)
+        try:
+            compiled.append((re.compile(pattern_str), replacement))
+        except re.error as exc:
+            print(f"WARNING: {path}:{lineno}: invalid regex, skipping: {exc}", file=sys.stderr)
+    return tuple(compiled)
+
+
 def strip_noise(text: str) -> str:
     """Remove system tags, hook output, and Claude Code UI chrome from text.
 
@@ -194,6 +268,14 @@ def strip_noise(text: str) -> str:
     text = _ANSI_OSC_RE.sub("", text)
     text = _ANSI_CSI_RE.sub("", text)
     text = _ANSI_SIMPLE_RE.sub("", text)
+    # User-supplied additional substitution rules, loaded dynamically from
+    # a file rather than hardcoded (see _dynamic_noise_patterns). Applied
+    # after the built-in cleanup above so custom rules act on already-
+    # cleaned text, and before the blank-line collapse below so any blank
+    # runs they create get tidied up too. No-op (empty tuple) unless a
+    # patterns file is actually configured.
+    for pattern, replacement in _dynamic_noise_patterns():
+        text = pattern.sub(replacement, text)
     # Collapse runs of blank lines created by the removals
     text = re.sub(r"\n{4,}", "\n\n\n", text)
     return text.strip()

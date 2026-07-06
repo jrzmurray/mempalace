@@ -9,6 +9,7 @@ from hypothesis import strategies as st
 
 from mempalace.normalize import (
     _SLACK_PROVENANCE_FOOTER,
+    _dynamic_noise_patterns,
     _extract_content,
     _format_tool_result,
     _format_tool_use,
@@ -26,6 +27,17 @@ from mempalace.normalize import (
     normalize,
     strip_noise,
 )
+
+
+@pytest.fixture(autouse=False)
+def _clear_dynamic_noise_patterns_cache():
+    """_dynamic_noise_patterns is lru_cache'd for the process lifetime (see
+    its docstring) -- tests that configure a patterns file must clear it
+    before AND after, or an earlier/later test's config leaks across.
+    """
+    _dynamic_noise_patterns.cache_clear()
+    yield
+    _dynamic_noise_patterns.cache_clear()
 
 
 # ── normalize() top-level ──────────────────────────────────────────────
@@ -2471,3 +2483,128 @@ def test_pi_jsonl_invalid_lines_skipped():
     ]
     result = _try_pi_jsonl("\n".join(lines))
     assert result is not None
+
+
+# ── dynamic noise patterns (user-supplied substitution file) ───────────
+
+
+class TestDynamicNoisePatternsLoader:
+    """_dynamic_noise_patterns() — loading/compiling the user-supplied file."""
+
+    def test_empty_when_nothing_configured(self, monkeypatch, _clear_dynamic_noise_patterns_cache):
+        monkeypatch.delenv("MEMPALACE_NOISE_PATTERNS_FILE", raising=False)
+        assert _dynamic_noise_patterns() == ()
+
+    def test_missing_configured_file_returns_empty_with_warning(
+        self, monkeypatch, capsys, _clear_dynamic_noise_patterns_cache
+    ):
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", "/nonexistent/does-not-exist.txt")
+        assert _dynamic_noise_patterns() == ()
+        assert "WARNING" in capsys.readouterr().err
+
+    def test_loads_valid_rule(self, monkeypatch, tmp_path, _clear_dynamic_noise_patterns_cache):
+        pf = tmp_path / "noise.txt"
+        pf.write_text("foo\tbar\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        rules = _dynamic_noise_patterns()
+        assert len(rules) == 1
+        pattern, replacement = rules[0]
+        assert pattern.sub(replacement, "a foo b") == "a bar b"
+
+    def test_skips_comments_and_blank_lines(
+        self, monkeypatch, tmp_path, _clear_dynamic_noise_patterns_cache
+    ):
+        pf = tmp_path / "noise.txt"
+        pf.write_text("# a comment\n\nfoo\tbar\n   \n# another\nbaz\tqux\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        rules = _dynamic_noise_patterns()
+        assert len(rules) == 2
+
+    def test_skips_line_missing_tab_separator(
+        self, monkeypatch, tmp_path, capsys, _clear_dynamic_noise_patterns_cache
+    ):
+        pf = tmp_path / "noise.txt"
+        pf.write_text("no-tab-here\nfoo\tbar\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        rules = _dynamic_noise_patterns()
+        assert len(rules) == 1  # only the valid line survives
+        assert "WARNING" in capsys.readouterr().err
+
+    def test_skips_invalid_regex(
+        self, monkeypatch, tmp_path, capsys, _clear_dynamic_noise_patterns_cache
+    ):
+        pf = tmp_path / "noise.txt"
+        pf.write_text("[unclosed\tbroken\nfoo\tbar\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        rules = _dynamic_noise_patterns()
+        assert len(rules) == 1
+        stderr = capsys.readouterr().err
+        assert "WARNING" in stderr
+        assert "invalid regex" in stderr
+
+    def test_empty_replacement_deletes_match(
+        self, monkeypatch, tmp_path, _clear_dynamic_noise_patterns_cache
+    ):
+        pf = tmp_path / "noise.txt"
+        pf.write_text("secret-token-[a-z0-9]+\t\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        (pattern, replacement) = _dynamic_noise_patterns()[0]
+        assert pattern.sub(replacement, "leaked secret-token-abc123 here") == "leaked  here"
+
+    def test_supports_backreferences(
+        self, monkeypatch, tmp_path, _clear_dynamic_noise_patterns_cache
+    ):
+        pf = tmp_path / "noise.txt"
+        pf.write_text(r"(\w+)@(\w+\.\w+)" + "\t" + r"[redacted@\2]" + "\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        (pattern, replacement) = _dynamic_noise_patterns()[0]
+        assert pattern.sub(replacement, "contact jr@example.com now") == (
+            "contact [redacted@example.com] now"
+        )
+
+    def test_inline_flag_for_case_insensitive_matching(
+        self, monkeypatch, tmp_path, _clear_dynamic_noise_patterns_cache
+    ):
+        pf = tmp_path / "noise.txt"
+        pf.write_text("(?i)hello\thi\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        (pattern, replacement) = _dynamic_noise_patterns()[0]
+        assert pattern.sub(replacement, "HELLO there Hello") == "hi there hi"
+
+    def test_cached_across_calls(self, monkeypatch, tmp_path, _clear_dynamic_noise_patterns_cache):
+        """Second call must not re-read the file (process-lifetime cache)."""
+        pf = tmp_path / "noise.txt"
+        pf.write_text("foo\tbar\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        first = _dynamic_noise_patterns()
+        pf.write_text("changed\tvalue\n")  # rewrite after first load
+        second = _dynamic_noise_patterns()
+        assert first is second  # same cached tuple object, file change not picked up
+
+
+class TestStripNoiseAppliesDynamicPatterns:
+    """Integration: strip_noise() actually applies the loaded rules."""
+
+    def test_noop_when_nothing_configured(self, monkeypatch, _clear_dynamic_noise_patterns_cache):
+        monkeypatch.delenv("MEMPALACE_NOISE_PATTERNS_FILE", raising=False)
+        text = "ordinary prose with /Users/someone/project/file.py in it"
+        assert strip_noise(text) == text
+
+    def test_strips_configured_pattern(
+        self, monkeypatch, tmp_path, _clear_dynamic_noise_patterns_cache
+    ):
+        pf = tmp_path / "noise.txt"
+        pf.write_text(r"/Users/[a-zA-Z0-9_.-]+" + "\t" + "\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        text = "before /Users/jrmurray after"
+        assert strip_noise(text) == "before  after"
+
+    def test_applied_after_builtin_ansi_stripping(
+        self, monkeypatch, tmp_path, _clear_dynamic_noise_patterns_cache
+    ):
+        """Dynamic rules see already-ANSI-stripped text, not raw escapes."""
+        pf = tmp_path / "noise.txt"
+        pf.write_text("clean word\tCLEANED\n")
+        monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
+        text = "before \x1b[1mclean\x1b[0m word after"
+        assert strip_noise(text) == "before CLEANED after"
