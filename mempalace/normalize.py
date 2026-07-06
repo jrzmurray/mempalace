@@ -25,7 +25,7 @@ import re
 import stat
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 # Provenance footer appended to Slack transcript output so downstream consumers
 # know the speaker roles are positionally assigned, not verified.
@@ -367,13 +367,56 @@ def _try_normalize_json(content: str) -> Optional[str]:
     return None
 
 
-def _try_claude_code_jsonl(content: str) -> Optional[str]:
-    """Claude Code JSONL sessions."""
-    lines = [line.strip() for line in content.strip().split("\n") if line.strip()]
+class PositionedClaudeCodeParse(NamedTuple):
+    """Result of _try_claude_code_jsonl(..., track_positions=True).
+
+    ``messages`` and ``start_lines`` are parallel lists: ``start_lines[i]``
+    is the 0-based index into ``content.strip().split("\\n")`` (interior
+    blank lines are counted; matches exactly what this function itself
+    iterates) where ``messages[i]`` first began. A merge (tool-result
+    folded into the previous assistant turn, multi-turn tool loop folded
+    into one assistant message) extends an EXISTING message rather than
+    appending a new one, so it does not get its own entry here -- the
+    start line stays the line where that message *first* appeared.
+
+    Caveat for callers that persist a start_line and reload it later: the
+    leading ``.strip()`` (pre-existing behavior, unrelated to this
+    feature) trims leading blank lines/whitespace before the split, so an
+    index is relative to the *stripped* content, not raw file bytes. A
+    real Claude Code JSONL transcript is never written with leading blank
+    lines in practice, so this doesn't matter for that format -- but a
+    caller resuming from a stored start_line MUST reproduce the exact same
+    ``content.strip().split("\\n")`` transform on re-read, not a raw
+    ``readlines()``, or the indices won't line up.
+    """
+
+    text: str
+    messages: list
+    start_lines: list
+
+
+def _try_claude_code_jsonl(content: str, track_positions: bool = False):
+    """Claude Code JSONL sessions.
+
+    ``track_positions=False`` (default, every existing caller): returns
+    ``Optional[str]``, unchanged from before this parameter existed.
+
+    ``track_positions=True``: returns ``Optional[PositionedClaudeCodeParse]``
+    instead, additionally carrying the raw-line position of each message --
+    used by convo_miner's cursor computation (incremental re-mining) to
+    identify where the trailing exchange in a transcript actually started
+    in the source file. Callers that don't need this keep paying zero cost
+    for it: the extra bookkeeping is a few list appends, not a second pass.
+    """
+    raw_lines = content.strip().split("\n")
     messages = []
+    start_lines = []  # parallel to `messages`; only touched on append, never on merge
     tool_use_map = {}  # tool_use_id → tool_name
 
-    for line in lines:
+    for line_index, raw_line in enumerate(raw_lines):
+        line = raw_line.strip()
+        if not line:
+            continue
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
@@ -411,6 +454,7 @@ def _try_claude_code_jsonl(content: str) -> Optional[str]:
                     messages[-1] = (prev_role, prev_text + "\n" + text)
                 elif not is_tool_only:
                     messages.append(("user", text))
+                    start_lines.append(line_index)
         elif msg_type == "assistant":
             text = _extract_content(msg_content, tool_use_map=tool_use_map)
             if text:
@@ -423,10 +467,16 @@ def _try_claude_code_jsonl(content: str) -> Optional[str]:
                     messages[-1] = (prev_role, prev_text + "\n" + text)
                 else:
                     messages.append(("assistant", text))
+                    start_lines.append(line_index)
 
-    if len(messages) >= 2:
-        return _messages_to_transcript(messages)
-    return None
+    if len(messages) < 2:
+        return None
+    transcript = _messages_to_transcript(messages)
+    if track_positions:
+        return PositionedClaudeCodeParse(
+            text=transcript, messages=messages, start_lines=start_lines
+        )
+    return transcript
 
 
 def _try_codex_jsonl(content: str) -> Optional[str]:

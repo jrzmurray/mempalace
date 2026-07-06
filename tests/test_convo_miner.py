@@ -9,6 +9,7 @@ import chromadb
 import pytest
 
 from mempalace.convo_miner import (
+    _compute_convo_cursor,
     _flag_possible_duplicates,
     _is_ai_tool_path,
     _register_file,
@@ -761,3 +762,102 @@ class TestFlagPossibleDuplicates:
         assert batch_metas[0]["possible_duplicate_of"] == "d1"
         assert batch_metas[1]["possible_duplicate_of"] == "d2"
         assert "possible_duplicate_of" not in batch_metas[2]
+
+
+# ── incremental-mining cursor (compute + store only, nothing reads it yet) ──
+#
+# Nothing reads this cursor yet -- these tests cover that it gets computed
+# correctly and stored on exactly the right drawer, not that mining
+# behavior changes (it doesn't, yet).
+
+
+class TestComputeConvoCursor:
+    def test_zero_chunks_returns_none(self, tmp_path):
+        f = tmp_path / "session.jsonl"
+        f.write_text('{"type":"user","message":{"content":"hi"}}\n')
+        assert _compute_convo_cursor(str(f), num_chunks=0) is None
+
+    def test_non_claude_code_format_returns_none(self, tmp_path):
+        """Plain text (or any format other than Claude Code JSONL) gets no
+        cursor -- the safe "no incremental path for this format" default."""
+        f = tmp_path / "chat.txt"
+        f.write_text("> hello\nhi there\n\n> how are you\ngood thanks\n")
+        assert _compute_convo_cursor(str(f), num_chunks=2) is None
+
+    def test_unreadable_file_returns_none(self, tmp_path):
+        missing = tmp_path / "does_not_exist.jsonl"
+        assert _compute_convo_cursor(str(missing), num_chunks=1) is None
+
+    def test_real_claude_code_jsonl_computes_correct_cursor(self, tmp_path):
+        import json as jsonlib
+
+        f = tmp_path / "session.jsonl"
+        lines = [
+            jsonlib.dumps({"type": "human", "message": {"content": "Q1"}}),  # line 0
+            jsonlib.dumps({"type": "assistant", "message": {"content": "A1"}}),  # line 1
+            jsonlib.dumps({"type": "human", "message": {"content": "Q2"}}),  # line 2
+            jsonlib.dumps({"type": "assistant", "message": {"content": "A2"}}),  # line 3
+        ]
+        f.write_text("\n".join(lines) + "\n")
+
+        cursor = _compute_convo_cursor(str(f), num_chunks=2)
+        assert cursor is not None
+        assert cursor["cursor_line"] == 2  # the second (last) user turn
+        assert cursor["cursor_chunk_index"] == 1  # 0-indexed, last of 2 chunks
+        assert cursor["cursor_format"] == "claude_code_jsonl"
+        expected_hash = __import__("hashlib").sha256(lines[2].encode("utf-8")).hexdigest()
+        assert cursor["cursor_anchor_hash"] == expected_hash
+
+
+class TestConvoCursorStorage:
+    """End-to-end: a real mine stores the cursor on exactly the last
+    drawer, nowhere else, and general mode gets no cursor at all."""
+
+    def test_cursor_stored_only_on_last_drawer(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            convo_path = Path(tmpdir) / "session.jsonl"
+            entries = [
+                '{"type":"human","message":{"content":"What is the plan?"}}',
+                '{"type":"assistant","message":{"content":"Start with the schema."}}',
+                '{"type":"human","message":{"content":"Any risks?"}}',
+                '{"type":"assistant","message":{"content":"Migration ordering is the main one."}}',
+            ]
+            convo_path.write_text("\n".join(entries) + "\n")
+            palace_path = os.path.join(tmpdir, "palace")
+
+            mine_convos(tmpdir, palace_path, wing="test")
+
+            client = chromadb.PersistentClient(path=palace_path)
+            col = client.get_collection("mempalace_drawers")
+            result = col.get(include=["metadatas"])
+            with_cursor = [m for m in result["metadatas"] if m and m.get("cursor_format")]
+            assert len(with_cursor) == 1, (
+                f"expected exactly one drawer with a cursor, got {len(with_cursor)}"
+            )
+            assert with_cursor[0]["cursor_chunk_index"] == max(
+                m["chunk_index"] for m in result["metadatas"] if m
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_general_mode_gets_no_cursor(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            convo_path = Path(tmpdir) / "session.jsonl"
+            entries = [
+                '{"type":"human","message":{"content":"What did we decide about the API design?"}}',
+                '{"type":"assistant","message":{"content":"We decided to use REST because it keeps things simple and well understood by the team."}}',
+            ]
+            convo_path.write_text("\n".join(entries) + "\n")
+            palace_path = os.path.join(tmpdir, "palace")
+
+            mine_convos(tmpdir, palace_path, wing="test", extract_mode="general")
+
+            client = chromadb.PersistentClient(path=palace_path)
+            col = client.get_collection("mempalace_drawers")
+            result = col.get(include=["metadatas"])
+            with_cursor = [m for m in result["metadatas"] if m and m.get("cursor_format")]
+            assert with_cursor == []
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
