@@ -1054,6 +1054,190 @@ class TestIncrementalReparse:
         raw_v2 = "\n".join(raw_lines[: cursor["cursor_line"] + 1]) + "\n"
         assert _incremental_reparse(cursor, raw_v2, min_chunk_size=0) is None
 
+    def test_equivalence_tool_round_in_original_trailing_exchange(self):
+        """A tool_use/tool_result round entirely within the ORIGINAL
+        trailing exchange (resolved before v1 was mined), with a brand
+        new exchange appended after it in v2. Confirms re-parsing the
+        tail in isolation correctly rebuilds tool_use_map from scratch
+        for that exchange rather than needing anything from before the
+        cursor."""
+        import json as jsonlib
+
+        lines_v1 = [
+            jsonlib.dumps({"type": "human", "message": {"content": "Q1"}}),
+            jsonlib.dumps({"type": "assistant", "message": {"content": "A1"}}),
+            jsonlib.dumps({"type": "human", "message": {"content": "Q2"}}),
+            jsonlib.dumps({"type": "assistant", "message": {"content": "A2"}}),
+            jsonlib.dumps({"type": "human", "message": {"content": "Q3"}}),
+            jsonlib.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Let me check."},
+                            {
+                                "type": "tool_use",
+                                "id": "tool1",
+                                "name": "Bash",
+                                "input": {"command": "ls"},
+                            },
+                        ]
+                    },
+                }
+            ),
+            jsonlib.dumps(
+                {
+                    "type": "human",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "tool1", "content": "file1.txt"}
+                        ]
+                    },
+                }
+            ),
+            jsonlib.dumps({"type": "assistant", "message": {"content": "Found it."}}),
+        ]
+        raw_v1 = "\n".join(lines_v1) + "\n"
+        raw_v2 = self._append_exchanges(raw_v1, start=4, count=1)
+        self._assert_equivalent_to_full_remine(raw_v1, raw_v2)
+
+    def test_equivalence_multi_round_tool_loop_in_new_trailing_exchange(self):
+        """The NEW exchange added since v1 (not the original trailing
+        one) itself contains a multi-round tool loop -- two separate
+        tool_use/tool_result rounds folding into one assistant message
+        -- before a final plain-text assistant reply. Confirms the
+        assistant-message-merge logic in _try_claude_code_jsonl behaves
+        identically whether it's parsing the tail in isolation or as
+        part of a full-document parse."""
+        import json as jsonlib
+
+        raw_v1 = self._build_jsonl(3)
+        new_lines = [
+            jsonlib.dumps({"type": "human", "message": {"content": "Q4"}}),
+            jsonlib.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Checking..."},
+                            {
+                                "type": "tool_use",
+                                "id": "tool1",
+                                "name": "Bash",
+                                "input": {"command": "ls"},
+                            },
+                        ]
+                    },
+                }
+            ),
+            jsonlib.dumps(
+                {
+                    "type": "human",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tool1",
+                                "content": "a.txt b.txt",
+                            }
+                        ]
+                    },
+                }
+            ),
+            jsonlib.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tool2",
+                                "name": "Read",
+                                "input": {"file_path": "a.txt", "offset": 1, "limit": 10},
+                            }
+                        ]
+                    },
+                }
+            ),
+            jsonlib.dumps(
+                {
+                    "type": "human",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tool2",
+                                "content": "contents of a.txt",
+                            }
+                        ]
+                    },
+                }
+            ),
+            jsonlib.dumps(
+                {"type": "assistant", "message": {"content": "Done, here's what I found."}}
+            ),
+        ]
+        raw_v2 = raw_v1.rstrip("\n") + "\n" + "\n".join(new_lines) + "\n"
+        self._assert_equivalent_to_full_remine(raw_v1, raw_v2)
+
+    def test_malformed_cursor_returns_none_instead_of_raising(self):
+        """A cursor dict missing required keys, or not a dict at all --
+        e.g. stored drawer metadata that predates this field, or was
+        hand-edited -- is just another way the append-only precondition
+        can't be confirmed. Must return None like every other
+        precondition failure, not raise."""
+        assert (
+            _incremental_reparse(
+                {"cursor_format": "claude_code_jsonl", "cursor_anchor_hash": "x"}, "a\nb\n"
+            )
+            is None
+        )
+        assert _incremental_reparse(None, "a\nb\n") is None
+        assert _incremental_reparse("not a dict", "a\nb\n") is None
+        assert (
+            _incremental_reparse(
+                {
+                    "cursor_format": "claude_code_jsonl",
+                    "cursor_line": 0,
+                    "cursor_chunk_index": 0,
+                    "cursor_anchor_hash": "x",
+                },
+                None,
+            )
+            is None
+        )
+        assert (
+            _incremental_reparse(
+                {
+                    "cursor_format": "claude_code_jsonl",
+                    "cursor_line": "not an int",
+                    "cursor_chunk_index": 0,
+                    "cursor_anchor_hash": "x",
+                },
+                "a\nb\n",
+            )
+            is None
+        )
+
+    def test_non_positive_chunk_size_raises_value_error(self):
+        """_compute_convo_cursor and _incremental_reparse both call
+        _chunk_by_exchange directly, bypassing chunk_exchanges' own
+        upfront chunk_size validation -- they must reproduce that
+        validation themselves rather than let a bad value fail deep
+        inside _emit_bounded with a confusing error."""
+        cursor = {
+            "cursor_format": "claude_code_jsonl",
+            "cursor_line": 0,
+            "cursor_chunk_index": 0,
+            "cursor_anchor_hash": "x",
+        }
+        with pytest.raises(ValueError):
+            _incremental_reparse(cursor, "a\nb\n", chunk_size=0)
+        with pytest.raises(ValueError):
+            _incremental_reparse(cursor, "a\nb\n", min_chunk_size=-1)
+        with pytest.raises(ValueError):
+            _compute_convo_cursor("a\nb\n", 3, chunk_size=0)
+
 
 class TestConvoCursorStorage:
     """End-to-end: a real mine stores the cursor on exactly the last

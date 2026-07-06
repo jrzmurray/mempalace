@@ -454,6 +454,27 @@ def _extract_authored_at(filepath):
     return latest
 
 
+def _resolve_chunk_params(chunk_size: Optional[int], min_chunk_size: Optional[int]) -> tuple:
+    """Resolve chunk_size/min_chunk_size against this module's defaults and
+    validate them with the same rules ``chunk_exchanges`` enforces.
+
+    ``_compute_convo_cursor`` and ``_incremental_reparse`` both call
+    ``_chunk_by_exchange`` directly, bypassing ``chunk_exchanges``' own
+    dispatcher (see their docstrings for why) -- which means they also
+    bypass its upfront validation. Without this, a non-positive
+    chunk_size reaches ``_emit_bounded``'s ``range(0, len(content),
+    chunk_size)`` and fails with a confusing ``ValueError`` deep inside
+    unrelated code instead of a clear one at the actual bad input.
+    """
+    resolved_chunk_size = chunk_size if chunk_size is not None else CHUNK_SIZE
+    resolved_min_chunk_size = min_chunk_size if min_chunk_size is not None else MIN_CHUNK_SIZE
+    if resolved_chunk_size <= 0:
+        raise ValueError(f"chunk_size must be > 0, got {resolved_chunk_size}")
+    if resolved_min_chunk_size < 0:
+        raise ValueError(f"min_chunk_size must be >= 0, got {resolved_min_chunk_size}")
+    return resolved_chunk_size, resolved_min_chunk_size
+
+
 def _compute_convo_cursor(
     raw_content: str,
     num_chunks: int,
@@ -519,6 +540,8 @@ def _compute_convo_cursor(
     if num_chunks <= 0:
         return None
 
+    resolved_chunk_size, resolved_min_chunk_size = _resolve_chunk_params(chunk_size, min_chunk_size)
+
     from .normalize import _messages_to_transcript, _try_claude_code_jsonl
 
     parsed = _try_claude_code_jsonl(raw_content, track_positions=True)
@@ -546,11 +569,7 @@ def _compute_convo_cursor(
 
     trailing_text = _messages_to_transcript(parsed.messages[last_user_idx:])
     trailing_chunk_count = len(
-        _chunk_by_exchange(
-            trailing_text.split("\n"),
-            chunk_size if chunk_size is not None else CHUNK_SIZE,
-            min_chunk_size if min_chunk_size is not None else MIN_CHUNK_SIZE,
-        )
+        _chunk_by_exchange(trailing_text.split("\n"), resolved_chunk_size, resolved_min_chunk_size)
     )
     if trailing_chunk_count <= 0 or trailing_chunk_count > num_chunks:
         return None
@@ -611,17 +630,37 @@ def _incremental_reparse(
     paragraph chunking. The append-only-verified precondition already
     establishes that the exchange-pair path applies to this transcript;
     the tail is a suffix of it, not a fresh decision point.
+
+    A malformed ``cursor`` (missing/wrong-typed keys, or not a dict at
+    all -- e.g. stored drawer metadata that predates this field or was
+    hand-edited) is just another way the preconditions above can fail,
+    so it also gets a safe ``None`` rather than raising ``KeyError`` /
+    ``AttributeError`` / ``TypeError`` on the caller.
     """
-    if cursor.get("cursor_format") != "claude_code_jsonl":
+    resolved_chunk_size, resolved_min_chunk_size = _resolve_chunk_params(chunk_size, min_chunk_size)
+
+    if not isinstance(cursor, dict) or cursor.get("cursor_format") != "claude_code_jsonl":
+        return None
+
+    cursor_line = cursor.get("cursor_line")
+    cursor_chunk_index = cursor.get("cursor_chunk_index")
+    cursor_anchor_hash = cursor.get("cursor_anchor_hash")
+    if (
+        not isinstance(cursor_line, int)
+        or isinstance(cursor_line, bool)
+        or not isinstance(cursor_chunk_index, int)
+        or isinstance(cursor_chunk_index, bool)
+        or not isinstance(cursor_anchor_hash, str)
+        or not isinstance(raw_content, str)
+    ):
         return None
 
     raw_lines = raw_content.strip().split("\n")
-    cursor_line = cursor["cursor_line"]
-    if cursor_line >= len(raw_lines):
+    if cursor_line < 0 or cursor_line >= len(raw_lines):
         return None
 
     anchor_line = raw_lines[cursor_line]
-    if hashlib.sha256(anchor_line.encode("utf-8")).hexdigest() != cursor["cursor_anchor_hash"]:
+    if hashlib.sha256(anchor_line.encode("utf-8")).hexdigest() != cursor_anchor_hash:
         return None
 
     from .normalize import _try_claude_code_jsonl
@@ -632,16 +671,13 @@ def _incremental_reparse(
         return None
 
     tail_chunks = _chunk_by_exchange(
-        tail_text.split("\n"),
-        chunk_size if chunk_size is not None else CHUNK_SIZE,
-        min_chunk_size if min_chunk_size is not None else MIN_CHUNK_SIZE,
+        tail_text.split("\n"), resolved_chunk_size, resolved_min_chunk_size
     )
     if not tail_chunks:
         return None
 
-    base_index = cursor["cursor_chunk_index"]
     for chunk in tail_chunks:
-        chunk["chunk_index"] += base_index
+        chunk["chunk_index"] += cursor_chunk_index
     return tail_chunks
 
 
