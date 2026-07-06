@@ -950,6 +950,16 @@ def _upsert_chunk_batch(
         # place (dropping near-certain duplicates) -- must run before
         # assert_no_collisions and the room_counts_delta tally below, so
         # neither one considers a chunk that's about to be dropped.
+        #
+        # If the chunk carrying the cursor above is itself dropped here,
+        # its cursor metadata is lost with it -- nothing rescues it onto
+        # a different surviving chunk. Accepted, not fixed:
+        # _fetch_stored_cursor finds no cursor on this file's next mine
+        # and falls back to the full re-mine path (already the safe
+        # default for "no cursor available"), which recomputes and
+        # reattaches a fresh cursor to whatever ends up as the new last
+        # chunk -- a one-time loss of the incremental-mining shortcut for
+        # this file, not a permanent one.
         dropped_count += _flag_or_drop_duplicates(
             collection, source_file, batch_docs, batch_ids, batch_metas, batch_rooms
         )
