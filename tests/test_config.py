@@ -901,3 +901,54 @@ def test_noise_patterns_file_config_json_value_not_required_to_exist(monkeypatch
         json.dump({"noise_patterns_file": "/nonexistent/path.txt"}, f)
     cfg = MempalaceConfig(config_dir=str(tmp_path))
     assert cfg.noise_patterns_file == "/nonexistent/path.txt"
+
+
+# ── duplicate_detection_enabled / duplicate_detection_threshold ─────────
+
+
+def test_duplicate_detection_disabled_by_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEMPALACE_DUPLICATE_DETECTION", raising=False)
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.duplicate_detection_enabled is False
+
+
+def test_duplicate_detection_enabled_from_config(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEMPALACE_DUPLICATE_DETECTION", raising=False)
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"duplicate_detection": {"enabled": True}}, f)
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.duplicate_detection_enabled is True
+
+
+def test_duplicate_detection_env_override_true(monkeypatch, tmp_path):
+    monkeypatch.setenv("MEMPALACE_DUPLICATE_DETECTION", "yes")
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.duplicate_detection_enabled is True
+
+
+def test_duplicate_detection_env_override_false_string(monkeypatch, tmp_path):
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"duplicate_detection": {"enabled": True}}, f)
+    monkeypatch.setenv("MEMPALACE_DUPLICATE_DETECTION", "0")
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.duplicate_detection_enabled is False
+
+
+def test_duplicate_detection_threshold_default(monkeypatch, tmp_path):
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.duplicate_detection_threshold == 0.9
+
+
+def test_duplicate_detection_threshold_from_config(monkeypatch, tmp_path):
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"duplicate_detection": {"threshold": 0.85}}, f)
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.duplicate_detection_threshold == 0.85
+
+
+@pytest.mark.parametrize("bad", ["abc", 1.5, -0.1, None])
+def test_duplicate_detection_threshold_garbage_falls_back_to_default(monkeypatch, tmp_path, bad):
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"duplicate_detection": {"threshold": bad}}, f)
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.duplicate_detection_threshold == 0.9
