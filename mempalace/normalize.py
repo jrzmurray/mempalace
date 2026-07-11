@@ -281,6 +281,50 @@ def strip_noise(text: str) -> str:
     return text.strip()
 
 
+# Evidence floor for is_textlike(): below this length the two ratios are
+# too noisy to accuse a chunk of being armor, so we default to keeping it
+# (verbatim principle: when in doubt, store).
+_TEXTLIKE_MIN_EVIDENCE = 100
+
+
+def is_textlike(
+    chunk: str,
+    *,
+    ws_min: float = 0.02,
+    alnum_max: float = 0.95,
+) -> bool:
+    """True when a chunk reads as prose/code, False when it reads as armor.
+
+    "Armor" = ASCII-armored binary (base64/hex payloads, bundler-packed
+    blobs, font/image dumps decoded to text). Its statistical signature is
+    the CONJUNCTION of near-zero whitespace AND near-pure alphanumeric
+    content. Real dense text fails at most one side: packed single-line
+    JSON has ~0 whitespace but is punctuation-rich (alnum ~0.7-0.85);
+    minified JS likewise; prose and CJK have normal whitespace. The
+    conjunction is what keeps them safe — do not relax it to a vote.
+
+    Pure predicate: never mutates content, decides nothing by itself.
+    Callers (miners/chunkers) choose whether to skip a failing chunk, and
+    should count skips visibly — silent truncation must never look like
+    full coverage.
+
+    Empirical basis (2026-07-11, real mixed corpus): 13,878 prose/code/
+    transcript/wireframe chunks → 1 flagged (a PEM private-key body, a
+    true positive); raw armor corpora (a 1.6MB bundler payload, binary
+    font dumps read as text) → 88-91% flagged. Chunks shorter than
+    _TEXTLIKE_MIN_EVIDENCE pass unconditionally: too little signal to
+    accuse. The empty string is not text.
+    """
+    n = len(chunk)
+    if n == 0:
+        return False
+    if n < _TEXTLIKE_MIN_EVIDENCE:
+        return True
+    ws = sum(c.isspace() for c in chunk) / n
+    alnum = sum(c.isalnum() for c in chunk) / n
+    return not (ws < ws_min and alnum > alnum_max)
+
+
 def _read_source_file(filepath: str) -> str:
     """Hardened raw-content read shared by normalize() and any caller that
     needs the exact same raw content it would read (e.g. convo_miner's

@@ -24,6 +24,7 @@ from mempalace.normalize import (
     _try_normalize_json,
     _try_pi_jsonl,
     _try_slack_json,
+    is_textlike,
     normalize,
     strip_noise,
 )
@@ -2729,3 +2730,62 @@ class TestStripNoiseAppliesDynamicPatterns:
         monkeypatch.setenv("MEMPALACE_NOISE_PATTERNS_FILE", str(pf))
         text = "before \x1b[1mclean\x1b[0m word after"
         assert strip_noise(text) == "before CLEANED after"
+
+
+# ── is_textlike() armor gate ───────────────────────────────────────────
+
+
+def test_textlike_prose_passes():
+    prose = (
+        "The migration applies cleanly on a fresh database and the seed "
+        "script now covers the new columns. Rollback tested both ways. "
+    ) * 3
+    assert is_textlike(prose)
+
+
+def test_textlike_cjk_and_emoji_pass():
+    text = "配置ファイルを更新しました。設定は正常です。デプロイに成功 🎉 " * 6
+    assert is_textlike(text)
+
+
+def test_textlike_packed_json_passes():
+    """Dense single-line JSON has ~0 whitespace but is punctuation-rich —
+    the conjunction must keep it (this was the false-positive class that
+    killed the earlier 2-of-3 voting design)."""
+    packed = (
+        '{"from":"indexer","to":"search_head","label":"serves_search"},'
+        '{"from":"deployment_server","to":"forwarder","label":"deploys_to"},'
+    ) * 6
+    assert is_textlike(packed)
+
+
+def test_textlike_minified_js_passes():
+    js = "var a=1;function f(x){return x*2}const y=f(a);console.log(y);" * 10
+    assert is_textlike(js)
+
+
+def test_textlike_base64_blob_fails():
+    blob = "QWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo0NTY3ODkwMTIzNDU2Nzg5MDEy" * 20
+    assert not is_textlike(blob)
+
+
+def test_textlike_pem_body_fails():
+    pem_body = "\n".join(["MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDaDuaZjc6j"] * 12)
+    assert not is_textlike(pem_body)
+
+
+def test_textlike_short_chunk_passes_unconditionally():
+    """Below the evidence floor there is not enough signal to accuse —
+    even a short pure-base64 token is kept (verbatim principle)."""
+    assert is_textlike("QWJjZGVmZ2hpamtsbW5vcA==")
+
+
+def test_textlike_empty_is_not_text():
+    assert not is_textlike("")
+
+
+def test_textlike_thresholds_are_tunable():
+    dense = "abcdefghij" * 30  # alnum=1.0, ws=0.0
+    assert not is_textlike(dense)
+    # Loosened alnum ceiling admits it again.
+    assert is_textlike(dense, alnum_max=1.01)
