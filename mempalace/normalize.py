@@ -247,6 +247,38 @@ def _dynamic_noise_patterns() -> tuple:
     return tuple(compiled)
 
 
+# ── ASCII-armored binary ("armor") — universal, not machine-specific ──
+# Payloads of binary encoded as text: data-URIs, bundler-packed blobs,
+# PEM/MIME bodies, and the residue binary leaves after decoding
+# (errors="replace"). These carry no recall value — no user will ever
+# search for the middle of a base64 run — and they poison embeddings.
+# Corpus-validated 2026-07-11 (13,878 real prose/code/transcript chunks:
+# zero false strips; a 1.6MB bundler payload and binary font dumps:
+# fully removed). Deletions target the payload only; PEM headers and
+# surrounding prose survive as searchable context.
+_ARMOR_PATTERNS = (
+    # data-URI payloads (inline images/fonts) — delete the whole URI.
+    (re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,[A-Za-z0-9+/=]+"), ""),
+    # Any unbroken base64-alphabet run >= 300 chars (bundler blobs,
+    # embedded binaries). Real tokens stay far under this (sha512-base64
+    # is 88 chars); minified JS breaks the class with punctuation.
+    (re.compile(r"[A-Za-z0-9+/]{300,}={0,2}"), ""),
+    # Line-wrapped base64 (PEM / MIME style: 3+ consecutive 56-80-char
+    # lines of pure base64) — evades the unbroken-run rule because each
+    # newline breaks the run. Also secret-hygiene: key material should
+    # not be searchable.
+    (re.compile(r"(?:[A-Za-z0-9+/]{56,80}\n){3,}[A-Za-z0-9+/]*={0,2}\n?"), " "),
+    # Runs of U+FFFD — what undecodable bytes become under
+    # errors="replace". A single lone one is kept (could be one real
+    # encoding hiccup inside genuine text); runs mean binary.
+    (re.compile("(?:\ufffd[ \t]?){2,}"), " "),
+    # Runs of C0/C1 control characters (tab/LF/CR excluded) — binary
+    # decoded latin-1-style. Collapsed to one space, not deleted, so
+    # adjacent legitimate tokens don't get welded together.
+    (re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]{2,}"), " "),
+)
+
+
 def strip_noise(text: str) -> str:
     """Remove system tags, hook output, and Claude Code UI chrome from text.
 
@@ -259,6 +291,8 @@ def strip_noise(text: str) -> str:
         text = pat.sub("", text)
     text = _HOOK_LINE_RE.sub("", text)
     text = _COLLAPSED_LINES_RE.sub("", text)
+    for pat, repl in _ARMOR_PATTERNS:
+        text = pat.sub(repl, text)
     # Strip the Claude Code collapsed-output chrome "[N tokens] (ctrl+o to expand)".
     # Narrow shape — a bare "(ctrl+o to expand)" in user prose stays intact.
     text = re.sub(r"\s*\[\d+\s+tokens?\]\s*\(ctrl\+o to expand\)", "", text)

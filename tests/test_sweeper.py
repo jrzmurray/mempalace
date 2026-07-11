@@ -111,7 +111,13 @@ class TestSweeperParsing:
 
         from mempalace.sweeper import parse_claude_jsonl
 
-        big_input = {"diff": "x" * 5000}  # well past the old 500-char cap
+        # Realistic text payload (not an armor-shaped alnum run — those
+
+        # are now deliberately stripped by strip_noise's armor rules).
+
+        big_input = {
+            "diff": "replace the old handler with the new handler " * 110
+        }  # well past the old 500-char cap
         path = tmp_path / "session_tools.jsonl"
         path.write_text(
             _json.dumps(
@@ -316,3 +322,74 @@ class TestSweeperDrawerMetadata:
                 "user",
                 "assistant",
             ), f"Drawer missing or wrong role metadata: {m}"
+
+
+class TestSweeperArmorGate:
+    """The sweeper strips noise per message and rejects armor drawers —
+    parity with the bulk JSONL path, which was already protected."""
+
+    @staticmethod
+    def _jsonl(tmp_path, content_str):
+        import json as _json
+
+        path = tmp_path / "armor_session.jsonl"
+        lines = [
+            {
+                "type": "user",
+                "timestamp": "2026-07-11T10:00:00Z",
+                "sessionId": "armor",
+                "uuid": "u-1",
+                "message": {"role": "user", "content": "inspect this blob"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-07-11T10:00:05Z",
+                "sessionId": "armor",
+                "uuid": "a-1",
+                "message": {"role": "assistant", "content": content_str},
+            },
+        ]
+        path.write_text("\n".join(_json.dumps(x) for x in lines))
+        return path
+
+    def test_pure_armor_message_is_skipped_and_counted(self, tmp_path):
+        from mempalace.sweeper import sweep
+
+        # Runs under the 300-char regex floor, separated by sparse dots:
+        # survives the strip_noise armor REGEXES, so the statistical
+        # is_textlike gate is what must catch it (ws~0, alnum>0.95).
+        armor = ("Ab09" * 60 + ".") * 5
+        path = self._jsonl(tmp_path, armor)
+        result = sweep(str(path), str(tmp_path / "palace"))
+        assert result["drawers_armor_skipped"] == 1, (
+            f"A pure-armor message must be rejected by the gate and counted. Got {result!r}."
+        )
+        assert result["drawers_added"] == 1, "The prose user message still ingests."
+
+    def test_prose_message_is_not_armor(self, tmp_path):
+        from mempalace.sweeper import sweep
+
+        prose = (
+            "The capture decoded to a font table, so this is not a config "
+            "regression. Full analysis in the follow-up. " * 3
+        )
+        path = self._jsonl(tmp_path, prose)
+        result = sweep(str(path), str(tmp_path / "palace"))
+        assert result["drawers_armor_skipped"] == 0
+        assert result["drawers_added"] == 2
+
+    def test_strip_noise_applied_per_message(self, tmp_path):
+        """System-reminder tags are stripped before storage — parity with
+        normalize._try_claude_code_jsonl's per-message stripping."""
+        from mempalace.sweeper import sweep
+        from mempalace.palace import get_collection
+
+        content = "<system-reminder>injected chrome</system-reminder>real user words survive here"
+        path = self._jsonl(tmp_path, content)
+        palace = str(tmp_path / "palace")
+        sweep(str(path), palace)
+        col = get_collection(palace)
+        docs = col.get(include=["documents"])["documents"]
+        joined = "\n".join(docs)
+        assert "real user words survive here" in joined
+        assert "injected chrome" not in joined

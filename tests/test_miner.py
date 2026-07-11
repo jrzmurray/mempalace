@@ -2667,3 +2667,48 @@ def test_mine_limit_summary_counts(tmp_path, capsys):
     assert "Files processed: 2" in out
     assert "Drawers filed: 6" in out
     assert "(limit: 2 new)" in out
+
+
+def test_project_mining_strips_armor_and_gates_chunks():
+    """Project files pass through strip_noise before chunking, and chunks
+    that read as ASCII-armored binary are dropped by is_textlike — the
+    path the wireframe-bundler incident (2026-07) came through."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+        os.makedirs(project_root / "docs")
+
+        prose = (
+            "Design commentary on the checkout flow, hover states, and the "
+            "confirmation step, written at length so chunking has real text "
+            "to work with and the file clears the minimum size floor. "
+        ) * 10
+        armor = "PROJARMORMARK" + "Ab09" * 400  # unbroken alnum run
+        write_file(
+            project_root / "docs" / "bundle-export.html",
+            f'<html><body><p>{prose}</p><script>var p="{armor}";</script></body></html>',
+        )
+        with open(project_root / "mempalace.yaml", "w") as f:
+            yaml.dump(
+                {
+                    "wing": "armor_project",
+                    "rooms": [{"name": "general", "description": "General"}],
+                },
+                f,
+            )
+
+        palace_path = project_root / "palace"
+        mine(str(project_root), str(palace_path))
+
+        client = chromadb.PersistentClient(path=str(palace_path))
+        col = client.get_collection("mempalace_drawers")
+        docs = col.get(include=["documents"])["documents"]
+        joined = "\n".join(docs)
+        assert col.count() > 0, "The prose portion of the file must still mine."
+        assert "PROJARMORMARK" not in joined, (
+            "Armor embedded in a project file must not reach the index — "
+            "either stripped by strip_noise or dropped by the is_textlike gate."
+        )
+        assert "checkout flow" in joined, "Legitimate prose must survive."
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

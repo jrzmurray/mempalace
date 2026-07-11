@@ -45,6 +45,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
+from .normalize import is_textlike, strip_noise
 from .palace import get_collection
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,11 @@ def parse_claude_jsonl(path: str) -> Iterator[dict]:
             session_id = record.get("sessionId") or record.get("session_id")
             if not session_id:
                 continue
-            content = _flatten_content(msg.get("content", ""))
+            # Same per-message noise stripping the bulk JSONL path applies
+            # (normalize._try_claude_code_jsonl) — before this, the sweeper
+            # ingested raw tool_result payloads verbatim, which is how
+            # binary captures historically reached the index.
+            content = strip_noise(_flatten_content(msg.get("content", "")))
             if not content.strip():
                 continue
             yield {
@@ -213,6 +218,8 @@ def sweep(jsonl_path: str, palace_path: str, source_label: Optional[str] = None)
     * ``drawers_skipped`` — records skipped by the cursor (strictly
       earlier than what's already stored).
     * ``drawers_upserted`` — total writes = added + already_present.
+    * ``drawers_armor_skipped`` — messages rejected by the is_textlike
+      armor gate (ASCII-armored binary), never written.
     """
     collection = get_collection(palace_path, create=True)
     cursors: dict = {}
@@ -220,6 +227,7 @@ def sweep(jsonl_path: str, palace_path: str, source_label: Optional[str] = None)
     drawers_added = 0
     drawers_already_present = 0
     drawers_skipped = 0
+    drawers_armor_skipped = 0
 
     batch_ids: list[str] = []
     batch_docs: list[str] = []
@@ -269,6 +277,13 @@ def sweep(jsonl_path: str, palace_path: str, source_label: Optional[str] = None)
             drawers_skipped += 1
             continue
 
+        if not is_textlike(rec["content"]):
+            # ASCII-armored binary that survived strip_noise (e.g. novel
+            # or line-wrapped encodings). Counted visibly — silent
+            # truncation must never look like full coverage.
+            drawers_armor_skipped += 1
+            continue
+
         drawer_id = _drawer_id_for_message(sid, rec["uuid"])
         document = f"{rec['role'].upper()}: {rec['content']}"
         metadata = {
@@ -295,6 +310,7 @@ def sweep(jsonl_path: str, palace_path: str, source_label: Optional[str] = None)
         "drawers_already_present": drawers_already_present,
         "drawers_upserted": drawers_added + drawers_already_present,
         "drawers_skipped": drawers_skipped,
+        "drawers_armor_skipped": drawers_armor_skipped,
         "cursor_by_session": cursors,
     }
 

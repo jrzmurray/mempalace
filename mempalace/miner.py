@@ -142,6 +142,7 @@ SKIP_FILENAMES = {
 # import ``CHUNK_SIZE`` / ``CHUNK_OVERLAP`` / ``MIN_CHUNK_SIZE`` from
 # ``mempalace.miner`` keep working unchanged. Single source of truth
 # lives in ``config.DEFAULT_CHUNK_*``.
+from .normalize import is_textlike, strip_noise  # noqa: E402
 from .config import (  # noqa: E402  (kept here for the legacy alias)
     DEFAULT_CHUNK_SIZE as CHUNK_SIZE,
     DEFAULT_CHUNK_OVERLAP as CHUNK_OVERLAP,
@@ -1470,6 +1471,15 @@ def process_file(
     if len(content) < effective_min:
         return 0, "general", None
 
+    # Project files get the same noise stripping as transcripts — before
+    # this, plain-file content reached chunking verbatim, so ASCII-armored
+    # payloads inside otherwise-legitimate files (bundler exports, PEM
+    # bodies) were indexed wholesale. Re-check the length floor: stripping
+    # can hollow out a mostly-armor file.
+    content = strip_noise(content)
+    if len(content) < effective_min:
+        return 0, "general", None
+
     room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(
         content,
@@ -1478,6 +1488,21 @@ def process_file(
         chunk_overlap=chunk_overlap,
         min_chunk_size=min_chunk_size,
     )
+
+    # Armor gate: drop chunks that read as ASCII-armored binary that
+    # survived strip_noise (novel/line-wrapped encodings). Runs before the
+    # chunk cap so a file isn't cap-skipped on garbage it no longer carries.
+    # Skips are surfaced on stderr — silent truncation must never look
+    # like full coverage.
+    textlike_chunks = [c for c in chunks if is_textlike(c["content"])]
+    armor_skipped = len(chunks) - len(textlike_chunks)
+    if armor_skipped:
+        print(
+            f"  ! [armor] {filepath.name[:50]:50} skipped {armor_skipped} "
+            f"armor chunk(s) via is_textlike",
+            file=sys.stderr,
+        )
+        chunks = textlike_chunks
 
     effective_cap = _resolve_max_chunks_per_file(max_chunks_per_file)
     if effective_cap > 0 and len(chunks) > effective_cap:
