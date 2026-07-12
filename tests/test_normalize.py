@@ -2789,6 +2789,8 @@ def test_textlike_thresholds_are_tunable():
     assert not is_textlike(dense)
     # Loosened alnum ceiling admits it again.
     assert is_textlike(dense, alnum_max=1.01)
+
+
 # ── promoted tool-chrome patterns ──────────────────────────────────────
 
 
@@ -2823,3 +2825,67 @@ def test_gh_run_log_prefix_keeps_arrow_marker():
 def test_tabbed_prose_without_gh_shape_untouched():
     text = "col a\tcol b\tcol c\nplain prose line"
     assert strip_noise(text) == text
+
+
+# ── secrets screen ─────────────────────────────────────────────────────
+
+
+def _tok(*parts):
+    """Assemble credential-shaped fixtures at runtime so no detectable
+    secret-pattern literal exists in this file — GitHub's push protection
+    (correctly) refuses blobs containing provider-shaped tokens, including
+    fakes. The secrets screen's own tests must not trip the platform's
+    secrets screen."""
+    return "".join(parts)
+
+
+def test_secrets_prefix_keyed_shapes_redacted():
+    cases = {
+        "aws " + _tok("AK", "IAIOSFODNN7EXAMPLE") + " key": "[redacted:aws-key-id]",
+        "token "
+        + _tok("ghp", "_16C7e42F292c6912E7710c838347Ae178B4a")
+        + " here": "[redacted:github-token]",
+        _tok("glpat", "-XyZ123abcDEF456ghi789") + " in ci": "[redacted:gitlab-token]",
+        "key "
+        + _tok("sk-ant", "-api03-aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdef")
+        + " set": "[redacted:api-key]",
+        _tok("xoxb", "-1234567890-abcdefghij") + " slack": "[redacted:slack-token]",
+        _tok("sk_live", "_4eC39HqLyjWDarjtT1zdp7dc") + " stripe": "[redacted:stripe-key]",
+        _tok("AIza", "SyA1234567890abcdefghijklmnopqrstuv")
+        + " google": "[redacted:google-api-key]",
+    }
+    for text, marker in cases.items():
+        out = strip_noise(text)
+        assert marker in out, f"{text!r} -> {out!r}"
+
+
+def test_secrets_jwt_and_bearer_redacted():
+    jwt = _tok(
+        "eyJ",
+        "hbGciOiJIUzI1NiJ9.",
+        "eyJ",
+        "zdWIiOiIxMjM0NTY3ODkwIn0.",
+        "dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    )
+    out = strip_noise(f"header was {jwt} in the capture")
+    assert "[redacted:jwt]" in out and "hbGciOiJIUzI1NiJ9" not in out
+    out2 = strip_noise("curl -H 'Authorization: Bearer abc123def456ghi789jkl012mno345pqr678'")
+    assert "Bearer [redacted:bearer-token]" in out2
+
+
+def test_secrets_context_survives_redaction():
+    key = _tok("AK", "IAIOSFODNN7EXAMPLE")
+    out = strip_noise(f"set AWS_ACCESS_KEY_ID={key} in the env file")
+    assert out == "set AWS_ACCESS_KEY_ID=[redacted:aws-key-id] in the env file"
+
+
+def test_secrets_placeholders_and_lookalikes_untouched():
+    keep = [
+        "use Bearer YOUR_TOKEN in the docs",  # placeholder under floor
+        "the sk-circle CSS class spins",  # short sk- identifier
+        "AKIA is the AWS key prefix",  # bare prefix, no body
+        "ghp_ is how classic tokens start",  # bare prefix
+        "commit eyJ is not a jwt",  # single segment
+    ]
+    for text in keep:
+        assert strip_noise(text) == text, text

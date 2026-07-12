@@ -301,6 +301,60 @@ _ARMOR_PATTERNS = (
     (re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]{2,}"), " "),
 )
 
+# ── Secrets screen — high-confidence credential shapes ────────────────
+# Live credentials captured in transcripts/tool output must never become
+# searchable memory. Only PREFIX/STRUCTURE-KEYED shapes are matched
+# (vendor-chosen sentinels like AKIA/ghp_/xoxb-): each pattern's anchor
+# is a string that essentially cannot occur in prose by accident.
+# Deliberately NO generic entropy/keyword detection (the detect-secrets
+# style "high-entropy string after the word password") — in a memory
+# system a false strip is destroyed recall, so FP-prone detectors are
+# excluded by design. Rule shapes follow the secretlint/gitleaks/
+# detect-secrets ecosystems. Replacement is a visible marker, not
+# deletion: "there was a credential here" is legitimate, searchable
+# context; the credential itself is not.
+_SECRET_PATTERNS = (
+    # AWS access key IDs (AKIA=long-lived, ASIA=STS, ABIA/ACCA variants).
+    (re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"), "[redacted:aws-key-id]"),
+    # GitHub tokens: classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained.
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b"), "[redacted:github-token]"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b"), "[redacted:github-token]"),
+    # GitLab personal access tokens.
+    (re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"), "[redacted:gitlab-token]"),
+    # OpenAI / Anthropic style keys. {32,} keeps short "sk-" prefixed
+    # identifiers (e.g. skeleton-loader CSS classes) out of scope.
+    (re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{32,}\b"), "[redacted:api-key]"),
+    # Slack tokens + incoming-webhook paths.
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "[redacted:slack-token]"),
+    (
+        re.compile(r"hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]+"),
+        "hooks.slack.com/services/[redacted:slack-webhook]",
+    ),
+    # Stripe secret/restricted keys (live AND test — test keys still
+    # grant API access to the test-mode account).
+    (re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b"), "[redacted:stripe-key]"),
+    # Google API keys.
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{35}\b"), "[redacted:google-api-key]"),
+    # npm automation tokens.
+    (re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"), "[redacted:npm-token]"),
+    # PyPI upload tokens (macaroon with fixed b64 "pypi.org" prefix).
+    (re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{20,}\b"), "[redacted:pypi-token]"),
+    # SendGrid API keys (SG.<22>.<43>).
+    (re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b"), "[redacted:sendgrid-key]"),
+    # Twilio API key SIDs (SK + 32 hex).
+    (re.compile(r"\bSK[a-f0-9]{32}\b"), "[redacted:twilio-key]"),
+    # JWTs — three dot-joined base64url segments, first two decoding
+    # from the literal '{"' ("eyJ"). Session tokens in captured curl/
+    # header output are credentials for their lifetime.
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+        "[redacted:jwt]",
+    ),
+    # Authorization: Bearer <token> header captures. {30,} floor keeps
+    # doc placeholders (YOUR_TOKEN, $TOKEN, <token>) out of scope.
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-.=~+/]{30,}"), "Bearer [redacted:bearer-token]"),
+)
+
 
 def strip_noise(text: str) -> str:
     """Remove system tags, hook output, and Claude Code UI chrome from text.
@@ -317,6 +371,8 @@ def strip_noise(text: str) -> str:
     text = _BASH_NO_OUTPUT_RE.sub("", text)
     text = _GH_RUN_LOG_PREFIX_RE.sub(r"\1", text)
     for pat, repl in _ARMOR_PATTERNS:
+        text = pat.sub(repl, text)
+    for pat, repl in _SECRET_PATTERNS:
         text = pat.sub(repl, text)
     # Strip the Claude Code collapsed-output chrome "[N tokens] (ctrl+o to expand)".
     # Narrow shape — a bare "(ctrl+o to expand)" in user prose stays intact.
