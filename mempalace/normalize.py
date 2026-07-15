@@ -196,6 +196,18 @@ _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 # background process's redirected stdout/stderr can pick this up verbatim;
 # a captured Bash tool_result carrying it is ordinary, not exotic.
 _ANSI_SIMPLE_RE = re.compile(r"\x1b[\x30-\x5a\x5c\x5e-\x7e]")
+# Orphan SGR bodies: the printable residue left after Claude Code strips the
+# ESC byte (0x1B) but preserves the rest of a CSI SGR sequence.  The corpus
+# contains zero real ESC bytes (Claude Code already strips them); what
+# remains is bare ``[31m``, ``[0m``, ``[38;5;173m`` etc. — 54 k hits across
+# 55 transcript files, all noise.  Six negative lookbehinds protect source
+# code that legitimately writes about escape sequences (``\x1b[…``,
+# ``\033[…``, ``\e[…``, ``^[[…``, ``ESC[…``), and a negative lookahead
+# ``(?!\])`` protects array subscripts like ``arr[1m]``.
+_ORPHAN_SGR_RE = re.compile(
+    r"(?<!\x1b)(?<!\^\[)(?<!\\e)(?<!\\033)(?<!\\x1b)(?<!ESC)"
+    r"\[[0-9]{1,3}(?:;[0-9]{1,3}){0,5}m(?!\])"
+)
 
 
 @functools.lru_cache(maxsize=1)
@@ -383,6 +395,7 @@ def strip_noise(text: str) -> str:
     text = _ANSI_OSC_RE.sub("", text)
     text = _ANSI_CSI_RE.sub("", text)
     text = _ANSI_SIMPLE_RE.sub("", text)
+    text = _ORPHAN_SGR_RE.sub("", text)
     # User-supplied additional substitution rules, loaded dynamically from
     # a file rather than hardcoded (see _dynamic_noise_patterns). Applied
     # after the built-in cleanup above so custom rules act on already-

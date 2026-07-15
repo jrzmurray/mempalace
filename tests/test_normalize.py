@@ -2430,6 +2430,47 @@ class TestAnsiPerformance:
         assert "\x1b" not in out
 
 
+class TestOrphanSgrStripping:
+    """Orphan SGR bodies: Claude Code strips the ESC byte but leaves the
+    printable ``[31m`` residue.  The _ORPHAN_SGR_RE pattern catches these
+    while six lookbehinds protect source code that writes about escapes."""
+
+    def test_bare_orphan_sgr_stripped(self):
+        assert strip_noise("before [31m red [0m after") == "before  red  after"
+
+    def test_256color_orphan_stripped(self):
+        assert strip_noise("prefix[38;5;173m colored [39m suffix") == "prefix colored  suffix"
+
+    def test_truecolor_orphan_stripped(self):
+        assert strip_noise("[38;2;173;127;168m text [0m") == "text"
+
+    def test_esc_byte_prefix_preserved(self):
+        text = "\x1b[31mreal escape\x1b[0m"
+        assert strip_noise(text) == "real escape"
+
+    def test_caret_bracket_prefix_preserved(self):
+        assert strip_noise("the notation ^[[0m means reset") == "the notation ^[[0m means reset"
+
+    def test_backslash_033_prefix_preserved(self):
+        text = 'echo -e "\\033[31mRed\\033[0m"'
+        assert strip_noise(text) == text.strip()
+
+    def test_backslash_x1b_prefix_preserved(self):
+        text = 'echo -e "\\x1b[1;32mGreen\\x1b[0m"'
+        assert strip_noise(text) == text.strip()
+
+    def test_backslash_e_prefix_preserved(self):
+        text = 'printf "\\e[33mYellow\\e[0m"'
+        assert strip_noise(text) == text.strip()
+
+    def test_esc_text_prefix_preserved(self):
+        text = "the SGR reset code is written ESC[0m in the docs."
+        assert strip_noise(text) == text.strip()
+
+    def test_array_subscript_bracket_preserved(self):
+        assert strip_noise("array[1m] = value") == "array[1m] = value"
+
+
 class TestAnsiPropertyBased:
     """Fuzz strip_noise with hypothesis rather than only hand-picked
     examples -- this ships to an external repo, so the invariant that
